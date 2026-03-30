@@ -288,8 +288,7 @@ export default function App() {
 
   const handlePanStart = (e) => {
     if (e.button === 2) { // Right Click
-      panStatus.current = { active: true, x: e.clientX, y: e.clientY };
-
+      setPopup(null);
       // Check for gifting potatoes to teammate in Teams mode
       if (settings.gameMode === 'teams' && gameStatus === 'playing') {
         const rect = canvasRef.current.getBoundingClientRect();
@@ -297,14 +296,17 @@ export default function App() {
         const cx = Math.floor(((e.clientX - rect.left) * sx) / CELL_SIZE);
         const cy = Math.floor(((e.clientY - rect.top) * sy) / CELL_SIZE);
         const state = stateRef.current;
-        if (cx >= 0 && cx < state.width && cy >= 0 && cy < state.height) {
+        if (state && cx >= 0 && cx < state.width && cy >= 0 && cy < state.height) {
           const cell = state.grid[cy][cx];
-          // If right-clicked on teammate (ID 3) land or fort walls
-          if (cell === 3 || cell === (FORT_WALL_OFFSET + 3)) {
-            setPopup({ type: 'gift', targetId: 3, x: e.clientX, y: e.clientY });
+          const owner = isFortWall(cell) ? fortWallOwner(cell) : cell;
+          // Identify if the tile belongs to an ally (Team A is 1 and 3)
+          if (state.isAlly && state.isAlly(owner, 1) && owner !== 1) {
+            setPopup({ type: 'gift', targetId: owner, gridX: cx, gridY: cy });
+            return; // Exit to prevent panning when opening the menu
           }
         }
       }
+      panStatus.current = { active: true, x: e.clientX, y: e.clientY };
     }
   };
   const handlePanMove = (e) => {
@@ -928,8 +930,12 @@ export default function App() {
                 enemyUnit.damageFlash=4;
                 if(enemyUnit.hp<=0)state.units=state.units.filter(eu=>eu!==enemyUnit);
               } else {
-                // Paint the tile
-                state.grid[t.y][t.x]=u.ownerId;
+                  // Paint the tile, but only if it's not an ally's
+                  const currentTile = state.grid[t.y][t.x];
+                  const isAllyTile = state.isAlly ? state.isAlly(currentTile, u.ownerId) : false;
+                  if (!isAllyTile) {
+                    state.grid[t.y][t.x]=u.ownerId;
+                  }
               }
               hit++;
             }
@@ -1285,9 +1291,9 @@ export default function App() {
 
   const giftPotatoes = (amount) => {
     const s = stateRef.current;
-    if (s.player.potatoes >= amount) {
+    if (s && s.player.potatoes >= amount && popup?.targetId) {
       s.player.potatoes -= amount;
-      const teammate = s.bots.find(b => b.id === 3);
+      const teammate = s.bots.find(b => b.id === popup.targetId);
       if (teammate) teammate.potatoes += amount;
       setPopup(null);
       syncUI();
@@ -1312,6 +1318,15 @@ export default function App() {
     }
 
     stateRef.current = createInitialState(settings, mapToUse);
+
+    if (settings.gameMode === 'teams') {
+      stateRef.current.isAlly = (id1, id2) => {
+        const getTeam = (id) => (id === 1 || id === 3) ? 'A' : (id === 2 || id === 4) ? 'B' : null;
+        const t1 = getTeam(isFortWall(id1) ? fortWallOwner(id1) : id1);
+        const t2 = getTeam(isFortWall(id2) ? fortWallOwner(id2) : id2);
+        return t1 !== null && t1 === t2;
+      };
+    }
     
     // Calculate total paintable area for Domination percentage
     let paintable = 0;
@@ -1636,18 +1651,41 @@ export default function App() {
                   position: 'absolute',
                   top: 0, left: 0
                 }}
-                className="cursor-crosshair touch-none bg-white"
+                className="cursor-crosshair touch-none bg-white z-0"
                 onMouseDown={e=>{if(e.button===0){isMouseDown.current=true;handleCanvasClick(e,true);}}}
                 onMouseMove={e=>{if(isMouseDown.current)handleCanvasClick(e,false);}}
                 onMouseLeave={()=>{isMouseDown.current=false;}}
                 onMouseUp={()=>{isMouseDown.current=false;}}
               />
+
+              {/* Gift Potatoes Button (Desktop - Tethered to World) */}
+              {popup?.type === 'gift' && !isMobile && (
+                <div 
+                  className="absolute z-50 pointer-events-auto" 
+                  style={{ 
+                    left: (popup.gridX * CELL_SIZE + CELL_SIZE/2) * zoom, 
+                    top: (popup.gridY * CELL_SIZE) * zoom,
+                    transform: 'translate(-50%, -100%)',
+                    marginBottom: '12px'
+                  }}
+                >
+                  <button 
+                    onMouseDown={e => e.stopPropagation()}
+                    onClick={(e) => { e.stopPropagation(); giftPotatoes(100); }}
+                    disabled={ui.potatoes < 100}
+                    className="flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-600 disabled:bg-slate-200 text-white font-bold py-2.5 px-4 rounded-2xl shadow-2xl transition-all active:scale-95 whitespace-nowrap border-2 border-white animate-in fade-in zoom-in duration-150"
+                  >
+                    <ArrowUp size={16} strokeWidth={3} />
+                    <span className="text-xs">Gift 100 🥔</span>
+                  </button>
+                </div>
+              )}
             </div>
           </div>
 
           {/* In-Canvas Milbase upgrade UI */}
           {popup?.type==='milbase' && (
-            <div className="popup-overlay--transparent">
+            <div className="popup-overlay--transparent" onMouseDown={() => setPopup(null)}>
               <div onMouseDown={e=>e.stopPropagation()} className="popup-card animate-in zoom-in duration-200">
                 <div className="bg-slate-800 p-4 flex items-center justify-between">
                   <div className="popup-headerbox">
@@ -1684,20 +1722,21 @@ export default function App() {
             </div>
           )}
 
-          {/* Gift Potatoes Tooltip Popup */}
-          {popup?.type === 'gift' && (
-            <div className={isMobile ? "fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm" : "fixed z-[100] pointer-events-none"} style={isMobile ? {} : { left: popup.x, top: popup.y }}>
-              <div className={`pointer-events-auto bg-white/95 rounded-2xl shadow-2xl border border-amber-200 p-3 flex flex-col items-center gap-2 animate-in fade-in zoom-in duration-150 ${isMobile ? '' : '-translate-x-1/2 -translate-y-full mb-4'}`} style={{ width: isMobile ? '220px' : '150px' }}>
-                <div className="text-[9px] font-black text-amber-600 uppercase tracking-widest">Team Logistics</div>
+          {/* Gift Potatoes Tooltip Popup (Mobile - Fullscreen Modal) */}
+          {popup?.type === 'gift' && isMobile && (
+            <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm p-6" onClick={() => setPopup(null)}>
+              <div className="flex flex-col items-center gap-4 animate-in fade-in zoom-in duration-150 w-full max-w-xs" onClick={e => e.stopPropagation()}>
                 <button 
                   onClick={() => giftPotatoes(100)}
                   disabled={ui.potatoes < 100}
-                  className="w-full flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-600 disabled:bg-slate-200 text-white font-bold py-2 rounded-xl shadow-sm transition-all active:scale-95"
+                  className="w-full flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-600 disabled:bg-slate-200 text-white font-black py-6 rounded-3xl shadow-2xl transition-all active:scale-95 border-4 border-white"
                 >
-                  <ArrowUp size={14} />
-                  <span className="text-xs">Gift 100 🥔</span>
+                  <ArrowUp size={18} />
+                  <span className="text-sm">Gift 100 🥔</span>
+                  <ArrowUp size={24} strokeWidth={4} />
+                  <span className="text-lg">GIFT 100 🥔</span>
                 </button>
-                <button onClick={() => setPopup(null)} className="text-[8px] font-bold text-slate-400 hover:text-slate-600 p-1">
+                <button onClick={() => setPopup(null)} className="text-xs font-bold text-slate-400 hover:text-slate-600 p-2">
                   Dismiss
                 </button>
               </div>
@@ -1706,7 +1745,7 @@ export default function App() {
 
           {/* In-Canvas Navalport popup UI */}
           {popup?.type==='navalport' && (
-            <div className="popup-overlay--transparent">
+            <div className="popup-overlay--transparent" onMouseDown={() => setPopup(null)}>
               <div onMouseDown={e=>e.stopPropagation()} className="popup-card animate-in zoom-in duration-200">
                 <div className="bg-blue-800 p-4 flex items-center justify-between">
                   <div className="flex items-center gap-3">
