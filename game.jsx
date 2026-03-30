@@ -1,297 +1,182 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { PaintBucket, Trophy, Play, Skull, Shield, Settings, Clock, ChevronDown, ChevronUp, Sword, Building2, ShoppingBag, Star, X, ArrowUp } from 'lucide-react';
+import { PaintBucket, Trophy, Play, Skull, Shield, Settings, Clock, ChevronDown, ChevronUp, Sword, Building2, ShoppingBag, Star, X, ArrowUp, Ship, Waves, ZoomIn, ZoomOut, LogOut, Maximize, RotateCcw } from 'lucide-react';
 import { MAP_SETTINGS } from './custom_map';
+import { GRID_W, GRID_H, CELL_SIZE, TICK_RATE, FORT_WALL_OFFSET, getTexture, BLDG, UNITS, BUCKET_UPGRADES, COLORS, PLACEHOLDER_GRAY_RGB } from './constants';
+import { fmt, rnd, clamp, isOwned, isFortWall, fortWallOwner, findTiles, canPlaceBuilding, findBorderTile, getBuildingPerimeter, makeEnt, seededRnd } from './utils';
+import { createInitialState, parseImageToGrid, createRecoloredCanvas } from './mapLogic';
+import Overlay from './Overlay';
 
-// ─── Grid & Tick ─────────────────────────────────────────────────────────────
-const GRID_W = 60, GRID_H = 40, CELL_SIZE = 20, TICK_RATE = 100;
-
-// Fort-wall tiles: value 10+ownerId (11,12,13,14) — impassable to enemies, walkable for owner
-const FORT_WALL_OFFSET = 10;
-
-// Asset Path Configuration
-// All game textures should be in: public/assets/textures/
-const ASSET_BASE = (import.meta.env.BASE_URL === './' || import.meta.env.BASE_URL === '/') 
-  ? '/assets/textures/' 
-  : `${import.meta.env.BASE_URL.replace(/\/$/, '')}/assets/textures/`;
-
-const getTexture = (name) => name.startsWith('/') ? name : `${ASSET_BASE}${name}`;
-
-// ─── Buildings ────────────────────────────────────────────────────────────────
-// Replaced emoji with sprite paths. Ensure these sprites are in public/sprites.
-// width/height: size in grid cells (1x1, 2x2, etc.)
-const BLDG = {
-  factory:   { sprite: 'factory.png', hp:3,  cocoaReward:4,  cost:20,  costKey:'factoryCost',  countKey:'factories',    desc:'Paint /click',   baseMul:1.5, w:2, h:2 },
-  farm:      { sprite: 'farm.png', hp:2,  cocoaReward:2,  cost:50,  costKey:'farmCost',     countKey:'farms',        desc:'+10/s',        baseMul:1.5, w:1, h:1 },
-  fort:      { sprite: 'fort.png', hp:8,  cocoaReward:8,  cost:300, costKey:'fortCost',     countKey:'forts',        desc:'Wall+block',     baseMul:1.5, w:3, h:3 },
-  infra:     { sprite: 'infra.png', hp:4,  cocoaReward:5,  cost:500, costKey:'infraCost',    countKey:'infrastructures', desc:'+20% eff',    baseMul:1.5, w:1, h:1 },
-  milbase:   { sprite: 'milbase.png', hp:10, cocoaReward:12, cost:400, costKey:'milbaseCost',  countKey:'milbases',     desc:'Train units',    baseMul:2.0, w:2, h:2 },
-  tower:     { sprite: 'tower.png', hp:6,  cocoaReward:7,  cost:600, costKey:'towerCost',   countKey:'towers',       desc:'Auto-fires at units', baseMul:1.5, w:1, h:3 },
-};
-
-// ─── Units ────────────────────────────────────────────────────────────────────
-// Replaced emoji with sprite paths. Ensure these sprites are in public/sprites.
-const UNITS = {
-  soldier:  { sprite: 'soldier.png', hp:3, atk:1, cd:10, speed:1, range:1,  cost:150, costKey:'soldierCost',  advanced:false, desc:'Basic fighter' },
-  scout:    { sprite: 'scout.png', hp:1, atk:1, cd:4,  speed:3, range:1,  cost:200, costKey:'scoutCost',    advanced:false, desc:'Fast, fragile' },
-  demo:     { sprite: 'demo.png', hp:5, atk:4, cd:15, speed:1, range:1,  cost:350, costKey:'demoCost',     advanced:false, desc:'Busts buildings/forts' },
-  ranger:   { sprite: 'ranger.png', hp:4, atk:2, cd:20, speed:1, range:3,  cost:500, costKey:'rangerCost',   advanced:true,  desc:'Long-range, hits 3 tiles' },
-  commander:{ sprite: 'commander.png', hp:6, atk:1, cd:12, speed:1, range:2,  cost:800, costKey:'commanderCost',advanced:true,  desc:'Boosts nearby allies' },
-};
-
-const BUCKET_UPGRADES = [
-  { radius:1, label:'Basic',  desc:'1×1',  cocoaCost:0  },
-  { radius:2, label:'Wide',   desc:'3×3',  cocoaCost:8  },
-  { radius:3, label:'Splash', desc:'5×5',  cocoaCost:20 },
-  { radius:4, label:'Flood',  desc:'7×7',  cocoaCost:45 },
-];
-
-const fmt = n => n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(n);
-const clamp = (v,lo,hi) => Math.max(lo, Math.min(hi, v));
-const rnd = n => Math.floor(Math.random()*n);
-
-// Seeded Random Helpers
-const hashString = str => {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    hash = (hash << 5) - hash + str.charCodeAt(i);
-    hash |= 0;
-  }
-  return hash;
-};
-const seededRnd = (s) => {
-  const seed = hashString(String(s));
-  let t = seed + 0x6D2B79F5;
-  return () => {
-    t = Math.imul(t ^ t >>> 15, t | 1);
-    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
-    return ((t ^ t >>> 14) >>> 0) / 4294967296;
-  };
-};
-
-const COLORS = MAP_SETTINGS.colors;
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-const isOwned = (cell, id) => cell===id || cell===FORT_WALL_OFFSET+id;
-const isFortWall = cell => cell >= FORT_WALL_OFFSET+1 && cell <= FORT_WALL_OFFSET+4;
-const fortWallOwner = cell => cell - FORT_WALL_OFFSET;
-
-const findTiles = (grid, id) => {
-  const t=[];
-  for(let y=0;y<GRID_H;y++) for(let x=0;x<GRID_W;x++) if(isOwned(grid[y][x],id)) t.push({x,y});
-  return t;
-};
-
-// Check if a building of given width/height can be placed at (x,y)
-// Pass existing buildings array to also check for overlaps with placed buildings
-const canPlaceBuilding = (grid, x, y, w, h, id, buildings = []) => {
-  for(let dy=0;dy<h;dy++) for(let dx=0;dx<w;dx++){
-    const nx=x+dx, ny=y+dy;
-    if(nx>=GRID_W||ny>=GRID_H||!isOwned(grid[ny][nx],id)) return false;
-  }
-  // Check against every existing building's full footprint
-  for(const b of buildings){
-    const bw = BLDG[b.type].w || 1;
-    const bh = BLDG[b.type].h || 1;
-    // AABB overlap test between [x, x+w) x [y, y+h) and [b.x, b.x+bw) x [b.y, b.y+bh)
-    if(x < b.x+bw && x+w > b.x && y < b.y+bh && y+h > b.y) return false;
-  }
-  return true;
-};
-
-const findBorderTile = (grid, id) => {
-  const DIRS=[[-1,0],[1,0],[0,-1],[0,1]]; const b=[];
-  for(let y=0;y<GRID_H;y++) for(let x=0;x<GRID_W;x++)
-    if(isOwned(grid[y][x],id))
-      for(const[dy,dx]of DIRS){const ny=y+dy,nx=x+dx;
-        if(ny>=0&&ny<GRID_H&&nx>=0&&nx<GRID_W&&!isOwned(grid[ny][nx],id)&&grid[ny][nx]!==9){b.push({x,y});break;}}
-  return b.length?b[rnd(b.length)]:null;
-};
-
-// Generic perimeter helper for buildings of any size
-const getBuildingPerimeter = (bx, by, bw, bh) => {
-  const t = [];
-  for (let dy = -1; dy <= bh; dy++) {
-    for (let dx = -1; dx <= bw; dx++) {
-      const isInside = dx >= 0 && dx < bw && dy >= 0 && dy < bh;
-      if (!isInside) {
-        const nx = bx + dx, ny = by + dy;
-        if (nx >= 0 && nx < GRID_W && ny >= 0 && ny < GRID_H) t.push({ x: nx, y: ny });
-      }
-    }
-  }
-  return t;
-};
-
-// Build initial entity
-const makeEnt = (id,name) => ({
-  id, name, color:COLORS[id],
-  potatoes:id===1?10:0, paintUnits:4, pixels:9,
-  factories:0, factoryCost:20, farms:0, farmCost:50,
-  forts:0, fortCost:300, infrastructures:0, infraCost:500,
-  milbases:0, milbaseCost:400, milbaseAdvanced:false,
-  towers:0, towerCost:600,
-  soldierCost:150, scoutCost:200, demoCost:350, rangerCost:500, commanderCost:800,
+const loadImage = (src) => new Promise((resolve, reject) => {
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  img.src = src;
+  img.onload = () => resolve(img);
+  img.onerror = () => reject(new Error(`Failed to load image: ${src}`));
 });
 
+// ─── Procedural Generation Helpers (Moved outside component) ────────────────
 
-const createInitialState = (settings, customMap) => {
-  const sRnd = seededRnd(settings.seed || Math.random());
-  const getRnd = (n) => Math.floor(sRnd() * n);
-
-  const useUserMap = settings.mapType === 'custom' && customMap;
-  const g = useUserMap 
-    ? customMap.map(row => [...row]) 
-    : Array.from({length:GRID_H},()=>Array(GRID_W).fill(0));
-    
-  if(!useUserMap) {
-    if (settings.mapType === 'realistic') {
-      if (settings.continentType === 'archipelago') {
-        for(let i=0; i<15; i++){
-          const ox=getRnd(GRID_W), oy=getRnd(GRID_H), r=getRnd(3)+2;
-          for(let y=oy-r;y<=oy+r;y++) for(let x=ox-r;x<=ox+r;x++)
-            if(x>=0&&x<GRID_W&&y>=0&&y<GRID_H && Math.hypot(x-ox, y-oy) < r && sRnd() > 0.3) g[y][x]=9;
-        }
-      } else { // Pangea
-        const ox=GRID_W/2, oy=GRID_H/2, r=12;
-        for(let y=oy-r;y<=oy+r;y++) for(let x=ox-r;x<=ox+r;x++)
-          if(x>=0&&x<GRID_W&&y>=0&&y<GRID_H && Math.hypot(x-ox, y-oy) < r && sRnd() > 0.4) g[y][x]=9;
-      }
-    } else {
-      const clusters = settings.terrainDensity || MAP_SETTINGS.terrainClusters;
-      if (settings.terrainType === 'maze') {
-        for(let i=0; i<clusters/2; i++) {
-          const x = getRnd(GRID_W), y = getRnd(GRID_H), len = getRnd(10)+5, vert = sRnd()>0.5;
-          for(let j=0; j<len; j++) {
-            const nx = vert?x:x+j, ny = vert?y+j:y;
-            if(nx<GRID_W && ny<GRID_H) g[ny][nx]=9;
-          }
-        }
-      } else if (settings.terrainType === 'grouped') {
-        for(let i=0; i<clusters/4; i++){
-          const ox=getRnd(GRID_W),oy=getRnd(GRID_H),r=getRnd(4)+3;
-          for(let y=oy-r;y<=oy+r;y++) for(let x=ox-r;x<=ox+r;x++)
-            if(x>=0&&x<GRID_W&&y>=0&&y<GRID_H&&sRnd()>0.3) g[y][x]=9;
-        }
-      } else { // scattered
-        for(let i=0; i<clusters; i++){
-          const ox=getRnd(GRID_W),oy=getRnd(GRID_H),r=getRnd(3)+1;
-          for(let y=oy-r;y<=oy+r;y++) for(let x=ox-r;x<=ox+r;x++)
-            if(x>=0&&x<GRID_W&&y>=0&&y<GRID_H&&sRnd()>0.4) g[y][x]=9;
-        }
+// Value-noise terrain: interpolates a coarse lattice of random values
+const generateValueNoise = (w, h, rng, octaves = 3, persistence = 0.5) => {
+  const noise = Array.from({ length: h }, () => new Float32Array(w));
+  let amplitude = 1, frequency = 1, maxAmp = 0;
+  for (let o = 0; o < octaves; o++) {
+    const scale = Math.max(2, Math.floor(Math.min(w, h) / (2 * frequency)));
+    const lw = Math.ceil(w / scale) + 2;
+    const lh = Math.ceil(h / scale) + 2;
+    const lattice = Array.from({ length: lh }, () => Float32Array.from({ length: lw }, () => rng()));
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const gx = x / scale, gy = y / scale;
+        const x0 = Math.floor(gx), y0 = Math.floor(gy);
+        const tx = gx - x0, ty = gy - y0;
+        const x1 = Math.min(x0 + 1, lw - 1), y1 = Math.min(y0 + 1, lh - 1);
+        const sx = tx * tx * (3 - 2 * tx), sy = ty * ty * (3 - 2 * ty);
+        const v = lattice[y0][x0] * (1 - sx) * (1 - sy) + lattice[y0][x1] * sx * (1 - sy) + lattice[y1][x0] * (1 - sx) * sy + lattice[y1][x1] * sx * sy;
+        noise[y][x] += v * amplitude;
       }
     }
+    maxAmp += amplitude; amplitude *= persistence; frequency *= 2;
   }
-  // Always spawn a 3x3 cluster for the player and bots
-  const spawn=(id,cx,cy)=>{
-    // Clear a 5x5 area
-    for(let y=cy-2;y<=cy+2;y++) for(let x=cx-2;x<=cx+2;x++) if(x>=0&&x<GRID_W&&y>=0&&y<GRID_H) g[y][x]=0;
-    // Set a 3x3 cluster
-    for(let y=cy-1;y<=cy+1;y++) for(let x=cx-1;x<=cx+1;x++) if(x>=0&&x<GRID_W&&y>=0&&y<GRID_H) g[y][x]=id;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) noise[y][x] /= maxAmp;
+  return noise;
+};
+
+const cellularAutomataPass = (grid, w, h, minNeighbors = 5) => {
+  const next = Array.from({ length: h }, () => new Uint8Array(w));
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let count = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        const ny = y + dy, nx = x + dx;
+        if (ny < 0 || ny >= h || nx < 0 || nx >= w) count++;
+        else if (grid[ny][nx]) count++;
+      }
+      next[y][x] = count >= minNeighbors ? 1 : 0;
+    }
+  }
+  return next;
+};
+
+const generateMaze = (w, h, rng) => {
+  const cw = Math.floor((w - 1) / 2), ch = Math.floor((h - 1) / 2);
+  const grid = Array.from({ length: h }, () => new Uint8Array(w).fill(1));
+  const visited = Array.from({ length: ch }, () => new Uint8Array(cw));
+  const stack = [];
+  const carve = (cx, cy) => {
+    visited[cy][cx] = 1;
+    grid[cy * 2 + 1][cx * 2 + 1] = 0;
+    stack.push([cx, cy]);
   };
-
-  // Procedural Spawn Logic: Find points that are spread out based on the seed
-  if (!useUserMap) {
-    const pts = [];
-    const margin = 8;
-    const playerCount = settings.botCount + 1;
-
-    for (let i = 0; i < playerCount; i++) {
-      let bestX = 0, bestY = 0, maxDist = -1;
-      // Sample 30 random spots and pick the one furthest from all existing spawns
-      for (let j = 0; j < 30; j++) {
-        const tx = margin + getRnd(GRID_W - margin * 2);
-        const ty = margin + getRnd(GRID_H - margin * 2);
-        const minDistToOthers = pts.length === 0 ? 100 : Math.min(...pts.map(p => Math.hypot(p.x - tx, p.y - ty)));
-        if (minDistToOthers > maxDist) {
-          maxDist = minDistToOthers;
-          bestX = tx;
-          bestY = ty;
-        }
+  carve(Math.floor(rng() * cw), Math.floor(rng() * ch));
+  const dirs = [[0,-1],[1,0],[0,1],[-1,0]];
+  while (stack.length > 0) {
+    const [cx, cy] = stack[stack.length - 1];
+    const shuffled = [...dirs].sort(() => rng() - 0.5);
+    let moved = false;
+    for (const [dcx, dcy] of shuffled) {
+      const nx = cx + dcx, ny = cy + dcy;
+      if (nx >= 0 && nx < cw && ny >= 0 && ny < ch && !visited[ny][nx]) {
+        grid[cy * 2 + 1 + dcy][cx * 2 + 1 + dcx] = 0;
+        carve(nx, ny); moved = true; break;
       }
-      pts.push({ x: bestX, y: bestY });
-      spawn(i + 1, bestX, bestY);
     }
+    if (!moved) stack.pop();
   }
-
-  const bots = [];
-  if(settings.botCount>=1) bots.push(makeEnt(2,'Alpha'));
-  if(settings.botCount>=2) bots.push(makeEnt(3,'Beta'));
-  if(settings.botCount>=3) bots.push(makeEnt(4,'Gamma'));
-  
-  return {grid:g,tickCount:0,settings,player:makeEnt(1,'You'),bots,buildings:[],units:[], brShrink: 0};
-};
-
-// Helper to convert hex color to RGB object
-const hexToRgb = hex => {
-  const bigint = parseInt(hex.replace('#',''), 16);
-  const r = (bigint >> 16) & 255;
-  const g = (bigint >> 8) & 255;
-  const b = bigint & 255;
-  return { r, g, b };
-};
-
-// The specific gray in your pixel art to be replaced (#646464)
-const PLACEHOLDER_GRAY_RGB = { r: 100, g: 100, b: 100 };
-
-
-// ─── Image → Grid Parser ──────────────────────────────────────────────────────
-// Reads pixel data from an uploaded image and converts it into a GRID_W×GRID_H
-// game grid. Brightness is used as the terrain signal:
-//   • Very dark pixels  (brightness < darkThresh)  → obstacle  (9)
-//   • Very light pixels (brightness > lightThresh)  → open land (0)
-//   • Mid-range pixels                              → open land (0)  [configurable]
-// The image is sampled at GRID_W × GRID_H sample points via a temporary canvas.
-const parseImageToGrid = (imgElement, darkThreshold = 60, lightThreshold = 200) => {
-  const tmpCanvas = document.createElement('canvas');
-  tmpCanvas.width  = GRID_W;
-  tmpCanvas.height = GRID_H;
-  const ctx = tmpCanvas.getContext('2d');
-  // Disable smoothing so we get hard pixel boundaries when downscaling
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(imgElement, 0, 0, GRID_W, GRID_H);
-
-  const { data } = ctx.getImageData(0, 0, GRID_W, GRID_H);
-  const grid = Array.from({ length: GRID_H }, (_, y) =>
-    Array.from({ length: GRID_W }, (_, x) => {
-      const idx = (y * GRID_W + x) * 4;
-      const r = data[idx], g = data[idx + 1], b = data[idx + 2];
-      // Perceived brightness (ITU-R BT.709)
-      const brightness = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-      // Very dark → obstacle, everything else → walkable
-      return brightness < darkThreshold ? 9 : 0;
-    })
-  );
   return grid;
 };
 
-// Helper to generate a recolored version of a sprite once
-const createRecoloredCanvas = (image, ownerColorHex, placeholderRgb) => {
-  if (!image || image.width === 0) return null;
-  
-  const ownerColorRgb = hexToRgb(ownerColorHex);
-  const tempCanvas = document.createElement('canvas');
-  tempCanvas.width = image.width;
-  tempCanvas.height = image.height;
-  const tempCtx = tempCanvas.getContext('2d');
+const largestOpenRegion = (grid, w, h) => {
+  const visited = Array.from({ length: h }, () => new Uint8Array(w));
+  let best = [], bestSize = 0;
+  for (let sy = 0; sy < h; sy++) for (let sx = 0; sx < w; sx++) {
+    if (grid[sy][sx] !== 0 || visited[sy][sx]) continue;
+    const region = [], queue = [[sx, sy]]; visited[sy][sx] = 1;
+    while (queue.length) {
+      const [x, y] = queue.shift(); region.push([x, y]);
+      for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+        const nx = x+dx, ny = y+dy;
+        if (nx>=0&&nx<w&&ny>=0&&ny<h&&!visited[ny][nx]&&grid[ny][nx]===0) { visited[ny][nx]=1; queue.push([nx,ny]); }
+      }
+    }
+    if (region.length > bestSize) { bestSize = region.length; best = region; }
+  }
+  return best;
+};
 
-  tempCtx.drawImage(image, 0, 0);
+const buildProceduralGrid = (w, h, settingsObj) => {
+  const { terrainType, terrainDensity, seed } = settingsObj;
+  const rng = seededRnd(seed || 'default');
+  const threshold = terrainDensity / 100;
+  let gameGrid = Array.from({ length: h }, () => Array(w).fill(0));
 
-  const imageData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
-  const pixels = imageData.data;
+  if (['highlands', 'desert', 'mountainous'].includes(terrainType)) {
+    const oct = (terrainType === 'highlands' || terrainType === 'mountainous') ? 5 : 4;
+    const noise = generateValueNoise(w, h, rng, oct, 0.45);
+    // Centering thresholds around 0.5-0.6 to ensure visibility even at low density
+    let limit = 0.75 - (threshold * 0.6); 
+    if (terrainType === 'highlands') limit = 0.65 - (threshold * 0.4);
+    if (terrainType === 'mountainous') limit = 0.55 - (threshold * 0.5);
+    if (terrainType === 'desert') limit = 0.85 - (threshold * 0.3);
+    
+    for(let y=0; y<h; y++) for(let x=0; x<w; x++) if(noise[y][x] > limit) gameGrid[y][x] = 9;
+  } else if (terrainType === 'maze') {
+    const raw = generateMaze(w, h, rng);
+    for(let y=0; y<h; y++) for(let x=0; x<w; x++) if(raw[y][x]) gameGrid[y][x] = 9;
+  } else if (['halo', 'giant_island', 'island_kingdom', 'pangea', 'archipelago', 'sea'].includes(terrainType)) {
+    const cx = w/2, cy = h/2;
+    const noiseMap = (['archipelago', 'island_kingdom', 'sea'].includes(terrainType)) ? generateValueNoise(w, h, rng, 3, 0.5) : null;
+    for(let y=0; y<h; y++) for(let x=0; x<w; x++) {
+      const dx = x - cx, dy = y - cy;
+      const dist = Math.sqrt(dx*dx + dy*dy);
+      const normDist = dist / (Math.min(w, h) / 2);
 
-  for (let i = 0; i < pixels.length; i += 4) {
-    if (
-      pixels[i] === placeholderRgb.r && 
-      pixels[i + 1] === placeholderRgb.g && 
-      pixels[i + 2] === placeholderRgb.b
-    ) {
-      pixels[i] = ownerColorRgb.r; 
-      pixels[i + 1] = ownerColorRgb.g; 
-      pixels[i + 2] = ownerColorRgb.b;
+      if (terrainType === 'halo') {
+        if (dist < h/4 || dist > h/2.2) gameGrid[y][x] = 5;
+      } else if (terrainType === 'pangea') {
+        if (normDist > 0.75) gameGrid[y][x] = 5;
+      } else if (terrainType === 'giant_island') {
+        if (normDist > 0.85) gameGrid[y][x] = 5;
+      } else if (terrainType === 'archipelago') {
+        if (noiseMap[y][x] < 0.5) gameGrid[y][x] = 5;
+        else if (noiseMap[y][x] > 0.82) gameGrid[y][x] = 9;
+      } else if (terrainType === 'island_kingdom') {
+        if (noiseMap[y][x] < 0.4) gameGrid[y][x] = 5;
+      } else if (terrainType === 'sea') {
+        if (noiseMap[y][x] < 0.7) gameGrid[y][x] = 5;
+      }
     }
   }
-  tempCtx.putImageData(imageData, 0, 0);
-  return tempCanvas;
+
+// ── Water generation (scattered/grouped/noise-based maps only) ──────────────
+// Water-dominant map types generate their own water above, so skip those.
+if (!['halo', 'giant_island', 'island_kingdom', 'pangea', 'archipelago', 'sea'].includes(terrainType)) {
+  const waterClusters = Math.max(5, Math.floor(threshold * 30));
+  const margin = 6;
+  for (let i = 0; i < waterClusters; i++) {
+    const ox = margin + Math.floor(rng() * (w - margin * 2));
+    const oy = margin + Math.floor(rng() * (h - margin * 2));
+    const r = Math.floor(rng() * 7) + 4; // Larger radius: 4–11
+    for (let y = oy - r; y <= oy + r; y++) {
+      for (let x = ox - r; x <= ox + r; x++) {
+        if (x >= 0 && x < w && y >= 0 && y < h
+            && Math.hypot(x - ox, y - oy) < r
+            && gameGrid[y][x] === 0) {  // only place on open land, never over obstacles
+          gameGrid[y][x] = 5;
+        }
+      }
+    }
+  }
+}
+// Connect land for non-water shapes: ensure we only have one main continent
+if (!['halo', 'giant_island', 'island_kingdom', 'pangea', 'archipelago', 'sea'].includes(terrainType)) {
+  const open = new Set(largestOpenRegion(gameGrid.map(r=>r.map(c=>c===0?0:1)), w, h).map(([x,y]) => `${x},${y}`));
+  for(let y=0; y<h; y++) for(let x=0; x<w; x++) {
+    if(gameGrid[y][x] === 0 && !open.has(`${x},${y}`)) gameGrid[y][x] = 9;
+  }
+}
+  return gameGrid;
 };
 
 // ─── App ──────────────────────────────────────────────────────────────────────
@@ -304,7 +189,6 @@ export default function App() {
     const saved = localStorage.getItem('customMap');
     return saved ? JSON.parse(saved) : null;
   });
-  const [customBG, setCustomBG] = useState(() => localStorage.getItem('customBG'));
   const [settings,setSettings]       = useState({
     duration:0,
     botCount:3,
@@ -313,23 +197,35 @@ export default function App() {
     gameMode: 'classic',
     seed: Math.random().toString(36).substring(7),
     terrainDensity: 20,
-    terrainType: 'scattered',
-    darkThreshold: 60,
-    continentType: 'pangea',
+    terrainType: 'pangea',
+    darkThreshold: 100,
+    worldMap: 'worldmap',
     passableObstacles: false,
     customMapName: 'New Arena',
     colors: { ...MAP_SETTINGS.colors }
   });
+  const [totalPaintable, setTotalPaintable] = useState(0);
+  const [showPeaceVote, setShowPeaceVote] = useState(false);
   const [menuTab,setMenuTab]         = useState('setup');
+  const [zoom, setZoom]              = useState(1);
   const [editorSubTab, setEditorSubTab] = useState('terrain'); // 'terrain', 'design', 'teams'
-  const [editorTool, setEditorTool] = useState('obstacle'); // 'obstacle' | 'erase' | 'spawn1' | 'spawn2'
+  const [editorTool, setEditorTool] = useState('obstacle'); // 'obstacle' | 'water' | 'erase' | 'spawn1' | 'spawn2'
   const [editorBrush, setEditorBrush] = useState(1); // 1, 2, 3 cell radius
   const editorBotCycle = useRef(2); // cycles 2,3,4 for multi-bot spawn placement
+  const [dims, setDims] = useState(() => {
+    const saved = localStorage.getItem('customMap');
+    if (saved) {
+      try { const m = JSON.parse(saved); return { w: m[0].length, h: m.length }; } catch { /**/ }
+    }
+    return { w: GRID_W, h: GRID_H };
+  });
   // Popup: { type:'milbase', building: {...} } or null
   const [popup,setPopup]             = useState(null);
 
   const canvasRef  = useRef(null);
+  const [isMobile, setIsMobile] = useState(() => window.matchMedia('(max-width: 768px)').matches);
   const gridCanvasRef = useRef(null); // Off-screen cache for the grid
+  const viewportRef = useRef(null);
   const requestRef = useRef(null);
   const stateRef   = useRef(null);
   const [loadedImages, setLoadedImages] = useState({});
@@ -338,15 +234,106 @@ export default function App() {
   
   const [imagesLoaded, setImagesLoaded] = useState(false);
   const isMouseDown= useRef(false);
+  const [mobileBottomTab, setMobileBottomTab] = useState('units'); // 'units' or 'buildings'
+  const panStatus  = useRef({ active: false, x: 0, y: 0 });
   const bucketRef  = useRef(activeBucket);
   useEffect(()=>{bucketRef.current=activeBucket;},[activeBucket]);
 
-  // Initialize off-screen canvas
+  // Reusable Zoom Logic: nextZoom is the target scale, anchorX/Y are viewport-relative pixels
+  const performZoom = useCallback((nextZoom, anchorX, anchorY) => {
+    const v = viewportRef.current;
+    if (!v) return;
+
+    // 1. Calculate the "World" coordinate currently under the anchor point
+    const worldX = (v.scrollLeft + anchorX) / zoom;
+    const worldY = (v.scrollTop + anchorY) / zoom;
+
+    // 2. Update the scale
+    setZoom(nextZoom);
+
+    // 3. Immediately adjust scroll so the same "World" point stays under the anchor
+    requestAnimationFrame(() => {
+      v.scrollLeft = worldX * nextZoom - anchorX;
+      v.scrollTop = worldY * nextZoom - anchorY;
+    });
+  }, [zoom]);
+
+  const handleWheel = useCallback((e) => {
+    const v = viewportRef.current;
+    if (!v) return;
+    e.preventDefault();
+    const zoomSpeed = 0.12;
+    const factor = 1 + (e.deltaY > 0 ? -1 : 1) * zoomSpeed;
+    const nextZoom = clamp(zoom * factor, 0.4, 2.5);
+    const rect = v.getBoundingClientRect();
+    performZoom(nextZoom, e.clientX - rect.left, e.clientY - rect.top);
+  }, [zoom, performZoom]);
+
   useEffect(() => {
-    const off = document.createElement('canvas');
-    off.width = GRID_W * CELL_SIZE;
-    off.height = GRID_H * CELL_SIZE;
-    gridCanvasRef.current = off;
+    const v = viewportRef.current;
+    if (!v) return;
+    v.addEventListener('wheel', handleWheel, { passive: false });
+    return () => v.removeEventListener('wheel', handleWheel);
+  }, [handleWheel]);
+
+  useEffect(() => {
+    const mql = window.matchMedia('(max-width: 768px)');
+    const handler = (e) => {
+      setIsMobile(e.matches);
+    };
+    mql.addEventListener('change', handler);
+    return () => mql.removeEventListener('change', handler);
+  }, []);
+
+
+  const handlePanStart = (e) => {
+    if (e.button === 2) { // Right Click
+      panStatus.current = { active: true, x: e.clientX, y: e.clientY };
+
+      // Check for gifting potatoes to teammate in Teams mode
+      if (settings.gameMode === 'teams' && gameStatus === 'playing') {
+        const rect = canvasRef.current.getBoundingClientRect();
+        const sx = canvasRef.current.width / rect.width, sy = canvasRef.current.height / rect.height;
+        const cx = Math.floor(((e.clientX - rect.left) * sx) / CELL_SIZE);
+        const cy = Math.floor(((e.clientY - rect.top) * sy) / CELL_SIZE);
+        const state = stateRef.current;
+        if (cx >= 0 && cx < state.width && cy >= 0 && cy < state.height) {
+          const cell = state.grid[cy][cx];
+          // If right-clicked on teammate (ID 3) land or fort walls
+          if (cell === 3 || cell === (FORT_WALL_OFFSET + 3)) {
+            setPopup({ type: 'gift', targetId: 3, x: e.clientX, y: e.clientY });
+          }
+        }
+      }
+    }
+  };
+  const handlePanMove = (e) => {
+    if (panStatus.current.active && viewportRef.current) {
+      const dx = e.clientX - panStatus.current.x;
+      const dy = e.clientY - panStatus.current.y;
+      viewportRef.current.scrollLeft -= dx;
+      viewportRef.current.scrollTop -= dy;
+      panStatus.current.x = e.clientX;
+      panStatus.current.y = e.clientY;
+    }
+  };
+
+
+  // Reset map on refresh
+  useEffect(() => {
+    localStorage.removeItem('customMap');
+    localStorage.removeItem('customBG');
+    setCustomMap(null);
+  }, []);
+
+  // Initialize off-screen canvas
+  const ensureGridCacheSize = useCallback((w, h) => {
+    if (!gridCanvasRef.current || gridCanvasRef.current.width !== w * CELL_SIZE || gridCanvasRef.current.height !== h * CELL_SIZE) {
+      const off = document.createElement('canvas');
+      off.width = w * CELL_SIZE;
+      off.height = h * CELL_SIZE;
+      gridCanvasRef.current = off;
+    }
   }, []);
 
   const PANELS = { units:false, buildings:false };
@@ -355,6 +342,9 @@ export default function App() {
   useEffect(()=>{localStorage.setItem('cocoaBeans',cocoaBeans);},[cocoaBeans]);
   useEffect(()=>{localStorage.setItem('activeBucket',activeBucket);},[activeBucket]);
   useEffect(()=>{localStorage.setItem('unlockedBucket',unlockedBucket);},[unlockedBucket]);
+  useEffect(()=>{
+    if (customMap) setDims({ w: customMap[0].length, h: customMap.length });
+  }, [customMap]);
 
   // Load all sprite images
   useEffect(() => {
@@ -369,17 +359,13 @@ export default function App() {
       ...Object.entries(MAP_SETTINGS.assets || {}).map(([key, src]) => ({ key, src: getTexture(src) }))
     ];
 
-    // If a custom background exists in localStorage, override the default
-    if (customBG) {
-      const bgIdx = imagesToLoad.findIndex(i => i.key === 'background');
-      if (bgIdx !== -1) imagesToLoad[bgIdx].src = customBG;
-    }
-
     const images = {};
     let loadedCount = 0;
     const totalImages = imagesToLoad.length;
 
     if (totalImages === 0) { setImagesLoaded(true); return; }
+
+    const finalize = () => { setLoadedImages({...images}); setImagesLoaded(true); };
 
     imagesToLoad.forEach(({ key, src }) => {
       const img = new Image();
@@ -388,18 +374,40 @@ export default function App() {
       img.onload = () => {
         images[key] = img;
         loadedCount++;
-        if (loadedCount === totalImages) { setLoadedImages(images); setImagesLoaded(true); }
+        if (loadedCount === totalImages) finalize();
       };
       img.onerror = () => {
-        console.error(`Failed to load asset: ${src}`);
+        // Sprite failed to load (missing asset) - continue without it, never block the game
+        console.warn(`Asset not found (game will run without it): ${src}`);
         loadedCount++;
-        if (loadedCount === totalImages) { setLoadedImages(images); setImagesLoaded(true); }
+        if (loadedCount === totalImages) finalize();
       };
     });
-  }, [customBG]);
+    // Safety net: if all images time out or stall, unblock the game after 3s
+    setTimeout(() => { if (!images || loadedCount < totalImages) finalize(); }, 3000);
+  }, []);
 
   const addCocoa = useCallback(n=>{
     setCocoaBeans(p=>{const nv=p+n; return nv;});
+  }, []);
+
+  // Simple BFS for unit pathfinding
+  const findPath = useCallback((grid, start, isGoal, isPassable) => {
+    const queue = [[start]];
+    const visited = new Set([`${start.x},${start.y}`]);
+    while (queue.length > 0) {
+      const path = queue.shift();
+      const { x, y } = path[path.length - 1];
+      if (isGoal(x, y)) return path;
+      for (const [dx, dy] of [[0,1],[0,-1],[1,0],[-1,0]]) {
+        const nx = x + dx, ny = y + dy;
+        if (ny >= 0 && ny < grid.length && nx >= 0 && nx < grid[0].length && !visited.has(`${nx},${ny}`) && isPassable(nx, ny)) {
+          visited.add(`${nx},${ny}`);
+          queue.push([...path, { x: nx, y: ny }]);
+        }
+      }
+    }
+    return null;
   }, []);
 
   // Fast draw using the cache
@@ -438,17 +446,17 @@ export default function App() {
   const [ui,setUi] = useState({
     potatoes:0,paintUnits:0,pixels:0,tickCount:0,leaderboard:[],
     factories:0,factoryCost:0,farms:0,farmCost:0,forts:0,fortCost:0,
-    infrastructures:0,infraCost:0,milbases:0,milbaseCost:0,milbaseAdvanced:false,
-    towers:0,towerCost:0,
-    soldierCost:0,scoutCost:0,demoCost:0,rangerCost:0,commanderCost:0,
-    unitCounts:{soldier:0,scout:0,demo:0,ranger:0,commander:0},
+    infrastructures:0,infraCost:0,milbases:0,milbaseCost:0,milbaseAdvanced:false,navalports:0,navalportCost:0,
+    towers:0,towerCost:0, 
+    soldierCost:0,scoutCost:0,demoCost:0,rangerCost:0,commanderCost:0,frigateCost:0,troopshipCost:0,
+    unitCounts:{soldier:0,scout:0,demo:0,ranger:0,commander:0,frigate:0,troopship:0},
     buildings:[],
   });
 
   const syncUI = useCallback(()=>{
     if(!stateRef.current)return;
     const s=stateRef.current; const all=[s.player,...s.bots];
-    const uc={soldier:0,scout:0,demo:0,ranger:0,commander:0};
+    const uc={soldier:0,scout:0,demo:0,ranger:0,commander:0,frigate:0,troopship:0};
     s.units.filter(u=>u.ownerId===1).forEach(u=>{if(uc[u.type]!==undefined)uc[u.type]++;});
     setUi({
       potatoes:s.player.potatoes,paintUnits:s.player.paintUnits,pixels:s.player.pixels,
@@ -458,61 +466,67 @@ export default function App() {
       forts:s.player.forts,fortCost:s.player.fortCost,
       infrastructures:s.player.infrastructures,infraCost:s.player.infraCost,
       milbases:s.player.milbases,milbaseCost:s.player.milbaseCost,milbaseAdvanced:s.player.milbaseAdvanced,
+      navalports:s.player.navalports,navalportCost:s.player.navalportCost,navalportAdvanced:s.player.navalportAdvanced,
       towers:s.player.towers,towerCost:s.player.towerCost,
-      soldierCost:s.player.soldierCost,scoutCost:s.player.scoutCost,demoCost:s.player.demoCost,
-      rangerCost:s.player.rangerCost,commanderCost:s.player.commanderCost,
-      unitCounts:uc,
+      soldierCost:s.player.soldierCost,scoutCost:s.player.scoutCost,demoCost:s.player.demoCost, 
+      rangerCost:s.player.rangerCost,commanderCost:s.player.commanderCost,frigateCost:s.player.frigateCost,troopshipCost:s.player.troopshipCost,battleshipCost:s.player.battleshipCost,
+      unitCounts:uc, 
       buildings:s.buildings.filter(b=>b.ownerId===1).map(b=>({...b})),
       leaderboard:all.filter(x=>x.pixels>0).sort((a,b)=>b.pixels-a.pixels)
-        .map(x=>({id:x.id,name:x.name,pixels:x.pixels,color:x.color}))
+        .map(x=>({id:x.id,name:x.name,pixels:x.pixels,color:x.color,
+          team: s.settings.gameMode==='teams' ? ((x.id===1||x.id===3)?'A':'B') : null
+        }))
     });
   }, []);
 
   // Redraw the static-ish grid layer to the off-screen cache
   const updateGridCache = useCallback(() => {
     if (!gridCanvasRef.current || !stateRef.current) return;
+    const state = stateRef.current;
+    const { grid, width: gw, height: gh, settings: stateSettings } = state;
+    ensureGridCacheSize(gw, gh);
     const gCtx = gridCanvasRef.current.getContext('2d');
-    const { grid } = stateRef.current;
     const CS = CELL_SIZE;
 
-    // Use black for custom maps to support transparent backgrounds, otherwise use the terrain color
-    gCtx.fillStyle = settings.mapType === 'custom' ? '#000000' : settings.colors[0];
-    gCtx.fillRect(0, 0, GRID_W * CS, GRID_H * CS);
+    gCtx.imageSmoothingEnabled = false;
+    gCtx.fillStyle = stateSettings.colors[0] ?? '#e2e8f0';
+    gCtx.fillRect(0, 0, gw * CS, gh * CS);
 
-    // Draw custom background image if it exists
-    const bgImg = loadedImages['background'];
-    if (bgImg) {
-      gCtx.drawImage(bgImg, 0, 0, GRID_W * CS, GRID_H * CS);
-    }
-
-    for (let y = 0; y < GRID_H; y++) {
-      for (let x = 0; x < GRID_W; x++) {
+    for (let y = 0; y < gh; y++) {
+      for (let x = 0; x < gw; x++) {
         const c = grid[y][x];
         if (c === 0) continue;
-        if (c === 9) { gCtx.fillStyle = settings.colors[9]; gCtx.fillRect(x * CS, y * CS, CS, CS); continue; }
+        // Inside updateGridCache, find the water check (c === 5)
+        if (c === 5) { 
+          gCtx.fillStyle = 'rgba(14, 165, 233, 0.1)'; // Very faint blue base
+          gCtx.fillStyle = stateSettings.colors[5] || '#0ea5e9';
+          gCtx.fillRect(x * CS, y * CS, CS, CS);
+          continue;
+        }
+        if (c === 9) { gCtx.fillStyle = stateSettings.colors[9] ?? '#475569'; gCtx.fillRect(x * CS, y * CS, CS, CS); continue; }
         if (isFortWall(c)) {
           const ownId = fortWallOwner(c);
-          gCtx.fillStyle = settings.colors[ownId];
+          gCtx.fillStyle = stateSettings.colors[ownId];
           gCtx.fillRect(x * CS, y * CS, CS, CS);
           gCtx.fillStyle = 'rgba(0,0,0,0.2)';
           gCtx.fillRect(x * CS, y * CS, CS, CS);
           continue;
         }
-        gCtx.fillStyle = settings.colors[c];
+        gCtx.fillStyle = stateSettings.colors[c];
         gCtx.fillRect(x * CS, y * CS, CS, CS);
       }
     }
     // Draw BR Zone
-    if (stateRef.current.settings.gameMode === 'br' && stateRef.current.brShrink > 0) {
+    if (stateSettings.gameMode === 'br' && state.brShrink > 0) {
       gCtx.fillStyle = 'rgba(239, 68, 68, 0.2)';
-      gCtx.fillRect(0, 0, GRID_W * CS, stateRef.current.brShrink * CS);
+      gCtx.fillRect(0, 0, gw * CS, state.brShrink * CS);
     }
     // Grid lines
-    gCtx.strokeStyle = 'rgba(0,0,0,0.03)'; gCtx.lineWidth = 0.5; gCtx.beginPath();
-    for (let y = 0; y <= GRID_H; y++) { gCtx.moveTo(0, y * CS); gCtx.lineTo(GRID_W * CS, y * CS); }
-    for (let x = 0; x <= GRID_W; x++) { gCtx.moveTo(x * CS, 0); gCtx.lineTo(x * CS, GRID_H * CS); }
+    gCtx.strokeStyle = 'rgba(0,0,0,0.1)'; gCtx.lineWidth = 0.5; gCtx.beginPath();
+    for (let y = 0; y <= gh; y++) { gCtx.moveTo(0, y * CS); gCtx.lineTo(gw * CS, y * CS); }
+    for (let x = 0; x <= gw; x++) { gCtx.moveTo(x * CS, 0); gCtx.lineTo(x * CS, gh * CS); }
     gCtx.stroke();
-  }, [loadedImages, settings]);
+  }, [loadedImages, ensureGridCacheSize]);
 
   // ── Draw ───────────────────────────────────────────────────────────────────
   const drawCanvas = useCallback(()=>{
@@ -522,11 +536,12 @@ export default function App() {
     const CS = CELL_SIZE;
     const time = performance.now();
 
-    if (!imagesLoaded) return;
     ctx.imageSmoothingEnabled = false;
 
-    // Draw the cached grid (Super Fast!)
+    // Draw the cached grid (Super Fast!) - always draw grid even if sprites are missing
     ctx.drawImage(gridCanvasRef.current, 0, 0);
+
+    if (!imagesLoaded) return; // Sprites not ready - grid still shows
 
     // Buildings
     for(const b of buildings){
@@ -598,9 +613,11 @@ export default function App() {
     const all=[state.player,...state.bots];
     const DIRS=[[-1,0],[1,0],[0,-1],[0,1]];
 
+    const gw = state.width, gh = state.height;
+
     // Count pixels (own territory + fort walls)
     const counts={1:0,2:0,3:0,4:0};
-    for(let y=0;y<GRID_H;y++) for(let x=0;x<GRID_W;x++){
+    for(let y=0;y<gh;y++) for(let x=0;x<gw;x++){
       const c=state.grid[y][x];
       if(c>=1&&c<=4)counts[c]++;
       else if(isFortWall(c))counts[fortWallOwner(c)]=(counts[fortWallOwner(c)]||0)+1;
@@ -608,8 +625,29 @@ export default function App() {
     state.player.pixels=counts[1]||0;
     state.bots.forEach(b=>b.pixels=counts[b.id]||0);
 
+    // Peace Vote logic: only show when victory is nearly 100% (98%)
+    if (state.totalPaintable) {
+      const teamPixels = (state.settings.gameMode === 'teams' && state.isAlly)
+        ? all.filter(e => state.isAlly(e.id, 1)).reduce((sum, e) => sum + e.pixels, 0)
+        : state.player.pixels;
+      const domRatio = teamPixels / state.totalPaintable;
+      const shouldShow = domRatio >= 0.98;
+      setShowPeaceVote(current => (current !== shouldShow ? shouldShow : current));
+    }
+
     if(state.player.pixels===0){setGameStatus('gameover');return;}
-    if(state.bots.filter(b=>b.pixels>0).length===0){setGameStatus('victory');return;}
+    // In teams mode, player's team (1+3) wins if all enemies (2+4) are eliminated
+    if(state.settings.gameMode==='teams' && state.isAlly){
+      const enemyBots=state.bots.filter(b=>!state.isAlly(b.id,1));
+      const allyBots=state.bots.filter(b=>state.isAlly(b.id,1));
+      if(enemyBots.every(b=>b.pixels===0)){setGameStatus('victory');return;}
+      if(allyBots.every(b=>b.pixels===0)&&state.bots.filter(b=>!state.isAlly(b.id,1)).some(b=>b.pixels>0)){
+        // All allies dead and enemies remain — gameover
+        // (player already checked above)
+      }
+    } else {
+      if(state.bots.filter(b=>b.pixels>0).length===0){setGameStatus('victory');return;}
+    }
     if(state.settings.duration>0&&state.tickCount>=state.settings.duration*10){setGameStatus('timeup');return;}
 
     const easy=state.settings.difficulty==='easy',hard=state.settings.difficulty==='hard';
@@ -628,7 +666,7 @@ export default function App() {
         // Remove fort walls if a fort is destroyed
         if(b.type==='fort'){
           const bw = BLDG.fort.w, bh = BLDG.fort.h;
-          for(const{x,y}of getBuildingPerimeter(b.x, b.y, bw, bh)){
+          for(const{x,y}of getBuildingPerimeter(b.x, b.y, bw, bh, gw, gh)){
             if(state.grid[y][x]===FORT_WALL_OFFSET+b.ownerId) state.grid[y][x]=b.ownerId;
           }
           all.find(e=>e.id===b.ownerId).forts=Math.max(0,all.find(e=>e.id===b.ownerId).forts-1);
@@ -643,32 +681,41 @@ export default function App() {
       state.bots.forEach(b=>{
         if(b.pixels<=0)return;
         const place=(type,extra={})=>{
-          const t=findTiles(state.grid,b.id); if(!t.length)return;
+          const isNaval = type === 'navalport';
+          // For naval ports, find water tiles (5) adjacent to our land. For others, find our land tiles.
+          const t = isNaval 
+            ? findTiles(state.grid, 5).filter(tile => [[-1,0],[1,0],[0,-1],[0,1]].some(([dy,dx]) => isOwned(state.grid[tile.y+dy]?.[tile.x+dx], b.id)))
+            : findTiles(state.grid, b.id);
+            
+          if(!t.length)return false;
           const bw = BLDG[type].w || 1;
           const bh = BLDG[type].h || 1;
-          // Try to find a valid placement spot
           let placed = false;
           for(let attempt=0;attempt<30&&!placed;attempt++){
             const tile=t[rnd(t.length)];
-            if(canPlaceBuilding(state.grid,tile.x,tile.y,bw,bh,b.id,state.buildings)){
+            if(canPlaceBuilding(state.grid,tile.x,tile.y,bw,bh,b.id,state.buildings, isNaval)){
               const bld={x:tile.x,y:tile.y,type,ownerId:b.id,hp:BLDG[type].hp,damageFlash:0,...extra};
               state.buildings.push(bld);
               placed=true;
               if(type==='fort'){
-                for(const{x,y}of getBuildingPerimeter(tile.x, tile.y, bw, bh)){
+                for(const{x,y}of getBuildingPerimeter(tile.x, tile.y, bw, bh, gw, gh)){
                   if(state.grid[y][x]===b.id) state.grid[y][x]=FORT_WALL_OFFSET+b.id;
                 }
               }
             }
           }
+          return placed;
         };
         const spawnUnit=(type)=>{
-          const t=findBorderTile(state.grid,b.id)||findTiles(state.grid,b.id)[0]; if(!t)return;
+          const uDef = UNITS[type];
+          // Find coastal water for ships, or borders for land units
+          const startTile = uDef.onWater ? findTiles(state.grid, 5).find(t => [[-1,0],[1,0],[0,-1],[0,1]].some(([dy,dx]) => isOwned(state.grid[t.y+dy]?.[t.x+dx], b.id))) : findBorderTile(state.grid,b.id)||findTiles(state.grid,b.id)[0];
+          if(!startTile)return;
           state.units.push({
-            x:t.x, 
-            y:t.y, 
-            visualX: t.x, 
-            visualY: t.y, 
+            x:startTile.x, 
+            y:startTile.y, 
+            visualX: startTile.x, 
+            visualY: startTile.y, 
             ownerId:b.id, 
             type, 
             hp:UNITS[type].hp, 
@@ -680,13 +727,21 @@ export default function App() {
         };
         // Bot AI purchase priority
         const botUnits=state.units.filter(u=>u.ownerId===b.id);
-        if(b.milbases===0&&b.potatoes>=b.milbaseCost){b.potatoes-=b.milbaseCost;b.milbases++;b.milbaseCost=Math.floor(b.milbaseCost*2);place('milbase');}
+        const hasWater = findTiles(state.grid, 5).length > 0;
+        if(b.milbases===0&&b.potatoes>=b.milbaseCost){ if(place('milbase')){b.potatoes-=b.milbaseCost;b.milbases++;b.milbaseCost=Math.floor(b.milbaseCost*2);} }
         else if(b.milbases>0&&botUnits.length<6&&b.potatoes>=b.soldierCost){b.potatoes-=b.soldierCost;b.soldierCost=Math.floor(b.soldierCost*1.4);spawnUnit(Math.random()<0.3?'demo':'soldier');}
-        else if(b.potatoes>=b.towerCost&&b.towers<3){b.potatoes-=b.towerCost;b.towers++;b.towerCost=Math.floor(b.towerCost*1.5);place('tower');}
-        else if(b.potatoes>=b.fortCost&&b.forts<4){b.potatoes-=b.fortCost;b.forts++;b.fortCost=Math.floor(b.fortCost*1.5);place('fort');}
-        else if(b.potatoes>=b.infraCost&&b.infrastructures<Math.floor(b.factories/2)){b.potatoes-=b.infraCost;b.infrastructures++;b.infraCost=Math.floor(b.infraCost*1.5);place('infra');}
-        else if(b.potatoes>=b.farmCost&&b.farms<b.factories+1){b.potatoes-=b.farmCost;b.farms++;b.farmCost=Math.floor(b.farmCost*1.5);place('farm');}
-        else if(b.potatoes>=b.factoryCost){b.potatoes-=b.factoryCost;b.factories++;b.factoryCost=Math.floor(b.factoryCost*1.5);place('factory');}
+        else if(hasWater && b.navalports===0 && b.potatoes>=b.navalportCost){ if(place('navalport')){b.potatoes-=b.navalportCost; b.navalports++; b.navalportCost=Math.floor(b.navalportCost*2);} }
+        else if(b.navalports>0 && botUnits.filter(u=>u.type==='frigate').length < 2 && b.potatoes>=b.frigateCost){b.potatoes-=b.frigateCost; b.frigateCost=Math.floor(b.frigateCost*1.5); spawnUnit('frigate');}
+        else if(b.navalports>0 && b.potatoes>=b.troopshipCost && botUnits.filter(u=>u.type==='troopship').length < 1) {
+           b.potatoes -= b.troopshipCost;
+           b.troopshipCost = Math.floor(b.troopshipCost * 1.5);
+           spawnUnit('troopship');
+        }
+        else if(b.potatoes>=b.towerCost&&b.towers<3){ if(place('tower')){b.potatoes-=b.towerCost;b.towers++;b.towerCost=Math.floor(b.towerCost*1.5);} }
+        else if(b.potatoes>=b.fortCost&&b.forts<4){ if(place('fort')){b.potatoes-=b.fortCost;b.forts++;b.fortCost=Math.floor(b.fortCost*1.5);} }
+        else if(b.potatoes>=b.infraCost&&b.infrastructures<Math.floor(b.factories/2)){ if(place('infra')){b.potatoes-=b.infraCost;b.infrastructures++;b.infraCost=Math.floor(b.infraCost*1.5);} }
+        else if(b.potatoes>=b.farmCost&&b.farms<b.factories+1){ if(place('farm')){b.potatoes-=b.farmCost;b.farms++;b.farmCost=Math.floor(b.farmCost*1.5);} }
+        else if(b.potatoes>=b.factoryCost){ if(place('factory')){b.potatoes-=b.factoryCost;b.factories++;b.factoryCost=Math.floor(b.factoryCost*1.5);} }
       });
 
     // ── Bot craft paint ────────────────────────────────────────────────────
@@ -718,7 +773,7 @@ export default function App() {
     // Remove dead units & orphaned (tile captured)
     state.units=state.units.filter(u=>{
       if(u.hp<=0)return false;
-      if(!isOwned(state.grid[u.y]?.[u.x],u.ownerId))return false;
+      if(!isOwned(state.grid[u.y]?.[u.x],u.ownerId) && state.grid[u.y]?.[u.x] !== 5) return false;
       return true;
     });
 
@@ -727,6 +782,54 @@ export default function App() {
       u.cd--;
       const cdBonus=hasCommanderNearby(u)?3:0;
       const effCd=Math.max(1,UNITS[u.type].cd-cdBonus);
+
+      // Troopship Logic: Carrying military units
+      if (u.type === 'troopship') {
+        if (!u.cargo) u.cargo = [];
+        const neighbors = [[0,1],[0,-1],[1,0],[-1,0]];
+        
+        // Pick up friendly units from shore
+        if (u.cargo.length < 3) {
+          for (const [dy, dx] of neighbors) {
+            const landUnit = state.units.find(ou => 
+              ou.ownerId === u.ownerId && 
+              ou.x === u.x + dx && ou.y === u.y + dy && 
+            !UNITS[ou.type]?.onWater && ou.type !== 'troopship' && ou.hp > 0
+            );
+            if (landUnit) {
+              u.cargo.push({ type: landUnit.type, hp: landUnit.hp });
+            landUnit.hp = -1; // Mark for removal by the cleanup filter at the start of next tick
+              break;
+            }
+          }
+        }
+        // Drop off units on non-friendly land
+        if (u.cargo.length > 0) {
+          for (const [dy, dx] of neighbors) {
+            const nx = u.x + dx, ny = u.y + dy;
+            if (ny >= 0 && ny < gh && nx >= 0 && nx < gw) {
+              const cell = state.grid[ny][nx];
+              if (cell !== 5 && cell !== 9 && !isOwned(cell, u.ownerId)) {
+                const stored = u.cargo.shift();
+                state.grid[ny][nx] = u.ownerId; // Paint the landing tile so the unit survives deployment
+                state.units.push({
+                  id: Math.random(),
+                  type: stored.type,
+                  ownerId: u.ownerId,
+                  x: nx, y: ny,
+                  visualX: u.x, visualY: u.y,
+                  hp: stored.hp,
+                  dir: [dy, dx],
+                  cd: 15,
+                  shootFlash: 0,
+                  damageFlash: 0
+                });
+                break;
+              }
+            }
+          }
+        }
+      }
 
       if(u.cd<=0){
         u.cd=effCd;
@@ -738,13 +841,34 @@ export default function App() {
         for(let dy=-range;dy<=range;dy++) for(let dx=-range;dx<=range;dx++){
           if(dy===0&&dx===0)continue;
           const ny=u.y+dy,nx=u.x+dx;
-          if(ny<0||ny>=GRID_H||nx<0||nx>=GRID_W)continue;
+          if(ny<0||ny>=gh||nx<0||nx>=gw)continue;
           const cell=state.grid[ny][nx];
-          // Can attack enemy territory, fort walls (demo only breaks walls), neutral
-          if(!isOwned(cell,u.ownerId)&&(cell!==9 || state.settings.passableObstacles)) tgts.push({y:ny,x:nx,dy,dx});
+          // Can attack enemy territory, fort walls, or neutral. Ignore allies.
+          const isAllyTile = state.isAlly ? state.isAlly(cell, u.ownerId) : isOwned(cell, u.ownerId);
+          if(!isAllyTile && cell!==5 && (cell!==9 || state.settings.passableObstacles)) tgts.push({y:ny,x:nx,dy,dx});
         }
 
-        if(tgts.length>0){
+        if(uData.onWater) {
+          // Troopship AI: If empty, go to friendly shores. If carrying, go to enemy shores.
+          const needsPickup = u.type === 'troopship' && (u.cargo?.length || 0) === 0;
+
+          // Only pathfind if we aren't already sitting next to an enemy to shoot
+          const path = findPath(state.grid, {x: u.x, y: u.y}, 
+            (nx, ny) => {
+              // Goal: A water tile adjacent to the target land type
+              return [[-1,0],[1,0],[0,-1],[0,1]].some(([dy,dx]) => {
+                const c = state.grid[ny+dy]?.[nx+dx];
+                if (c === undefined || c === 5 || c === 9) return false;
+                // If empty troopship, look for friendly land. Otherwise, look for enemy land.
+                return needsPickup ? isOwned(c, u.ownerId) : !isOwned(c, u.ownerId);
+              });
+            },
+            (nx, ny) => state.grid[ny][nx] === 5
+          );
+          if(path && path.length > 1) { u.x = path[1].x; u.y = path[1].y; }
+        }
+
+        if(tgts.length>0 || uData.onWater){
           // Demo units prefer buildings/forts
           if(u.type==='demo'){
             tgts.sort((a,b)=>{
@@ -771,7 +895,7 @@ export default function App() {
                   if(b.type !== 'fort' || b.ownerId !== fortWallOwner(cell)) return false;
                   const bw = BLDG.fort.w, bh = BLDG.fort.h;
                   // Check if this specific wall tile is part of this fort's perimeter
-                  return t.x >= b.x - 1 && t.x <= b.x + bw && t.y >= b.y - 1 && t.y <= b.y + bh;
+                return t.x >= b.x - 1 && t.x <= b.x + bw && t.y >= b.y - 1 && t.y <= b.y + bh;
                 });
                 if(fortBldIdx>=0)damageBuilding(fortBldIdx,u.ownerId);
               }
@@ -814,13 +938,15 @@ export default function App() {
 
           // Move toward border (scouts move faster)
           const movePct=u.type==='scout'?0.8:0.3;
-          if(Math.random()<movePct){
+          if(!uData.onWater && Math.random()<movePct){
             const bt=findBorderTile(state.grid,u.ownerId);
             if(bt){u.x=bt.x;u.y=bt.y;}
           }
         } else {
-          const bt=findBorderTile(state.grid,u.ownerId);
-          if(bt){u.x=bt.x;u.y=bt.y;}
+          if(!uData.onWater) {
+            const bt=findBorderTile(state.grid,u.ownerId);
+            if(bt){u.x=bt.x;u.y=bt.y;}
+          }
         }
       }
     }
@@ -830,10 +956,10 @@ export default function App() {
       state.bots.forEach(b=>{
         if(b.pixels<=0||b.paintUnits<=0)return;
         const tgts=[];
-        for(let y=0;y<GRID_H;y++) for(let x=0;x<GRID_W;x++)
+        for(let y=0;y<gh;y++) for(let x=0;x<gw;x++)
           if(isOwned(state.grid[y][x],b.id)) for(const[dy,dx]of DIRS){
             const ny=y+dy,nx=x+dx;
-            if(ny>=0&&ny<GRID_H&&nx>=0&&nx<GRID_W&&!isOwned(state.grid[ny][nx],b.id)&&state.grid[ny][nx]!==9)
+            if(ny>=0&&ny<gh&&nx>=0&&nx<gw&&!isOwned(state.grid[ny][nx],b.id)&&state.grid[ny][nx]!==9&&state.grid[ny][nx]!==5)
               tgts.push({y:ny,x:nx});
           }
         if(!tgts.length)return;
@@ -843,10 +969,13 @@ export default function App() {
           const t=tgts[i]; const cell=state.grid[t.y][t.x];
           // Bots CANNOT spread over fort walls
           if(isFortWall(cell))continue;
+          // Bots CANNOT spread over ally tiles in teams mode
+          if(state.isAlly && cell>=1 && cell<=4 && state.isAlly(cell, b.id)) continue;
           const bldIdx=state.buildings.findIndex(bd => {
             const bw = BLDG[bd.type].w || 1;
             const bh = BLDG[bd.type].h || 1;
-            return bd.ownerId !== b.id && t.x >= bd.x && t.x < bd.x + bw && t.y >= bd.y && t.y < bd.y + bh;
+            const isEnemy = state.isAlly ? !state.isAlly(bd.ownerId, b.id) : bd.ownerId !== b.id;
+            return isEnemy && t.x >= bd.x && t.x < bd.x + bw && t.y >= bd.y && t.y < bd.y + bh;
           });
           if(bldIdx>=0){damageBuilding(bldIdx,b.id);}
           else{state.grid[t.y][t.x]=b.id;b.paintUnits--;used++;}
@@ -854,7 +983,7 @@ export default function App() {
       });
 
     // Orphan-check buildings
-    state.buildings=state.buildings.filter(b=>isOwned(state.grid[b.y]?.[b.x],b.ownerId));
+    state.buildings=state.buildings.filter(b=>isOwned(state.grid[b.y]?.[b.x],b.ownerId) || (b.type === 'navalport' && state.grid[b.y]?.[b.x] === 5));
 
     if(state.tickCount%2===0){ syncUI(); updateGridCache(); }
   }, [syncUI, addCocoa, updateGridCache]);
@@ -865,7 +994,10 @@ export default function App() {
     const ti=gameStatus==='playing' ? setInterval(updateLogic,TICK_RATE) : null;
     const rf=()=>{drawCanvas();requestRef.current=requestAnimationFrame(rf);};
     requestRef.current=requestAnimationFrame(rf);
-    const up=()=>{isMouseDown.current=false;};
+    const up=()=>{
+      isMouseDown.current=false;
+      panStatus.current.active = false;
+    };
     window.addEventListener('mouseup',up);
     return()=>{if(ti)clearInterval(ti);cancelAnimationFrame(requestRef.current);window.removeEventListener('mouseup',up);};
   },[gameStatus,updateLogic,drawCanvas]);
@@ -873,17 +1005,27 @@ export default function App() {
   // ── Canvas click - paint + milbase popup ──────────────────────────────────
   const handleCanvasClick = useCallback((e,isDown)=>{
     if(gameStatus!=='playing' && gameStatus!=='editor')return;
+    // If clicking a button/popup, stop propagation should handle it, but we bail if coordinates are invalid
+    const state=stateRef.current;
+    const gw = state.width, gh = state.height;
     const rect=canvasRef.current.getBoundingClientRect();
     const sx=canvasRef.current.width/rect.width,sy=canvasRef.current.height/rect.height;
     const cx=Math.floor(((e.clientX-rect.left)*sx)/CELL_SIZE);
     const cy=Math.floor(((e.clientY-rect.top)*sy)/CELL_SIZE);
-    if(cx<0||cx>=GRID_W||cy<0||cy>=GRID_H)return;
-    const state=stateRef.current;
+    if(cx<0||cx>=gw||cy<0||cy>=gh)return;
 
-    // Check if clicking a player milbase — show popup
+    // PRIORITY: Check building list first to prevent painting over your own structure
     if(isDown){
-      const milbase=state.buildings.find(b=>b.type==='milbase'&&b.ownerId===1&&b.x===cx&&b.y===cy);
-      if(milbase){setPopup({type:'milbase',building:milbase});return;}
+      const bld = state.buildings.find(b => {
+        if (b.ownerId !== 1 || (b.type !== 'milbase' && b.type !== 'navalport')) return false;
+        const def = BLDG[b.type];
+        return cx >= b.x && cx < b.x + (def.w || 1) && cy >= b.y && cy < b.y + (def.h || 1);
+      });
+      if (bld) {
+        setPopup({ type: bld.type, building: bld });
+        isMouseDown.current = false; // Disable paint drag if we opened a menu
+        return;
+      }
     }
 
     // Editor Mode
@@ -892,9 +1034,11 @@ export default function App() {
       for(let dy=-(brush-1); dy<=(brush-1); dy++){
         for(let dx=-(brush-1); dx<=(brush-1); dx++){
           const ex=cx+dx, ey=cy+dy;
-          if(ex<0||ex>=GRID_W||ey<0||ey>=GRID_H) continue;
+          if(ex<0||ex>=gw||ey<0||ey>=gh) continue;
           if(editorTool==='obstacle'){
             state.grid[ey][ex] = 9;
+          } else if(editorTool==='water'){
+            state.grid[ey][ex] = 5;
           } else if(editorTool==='erase'){
             state.grid[ey][ex] = 0;
           } else if(editorTool==='spawn1'){
@@ -902,7 +1046,7 @@ export default function App() {
             if(dy===0&&dx===0){
               for(let sy=-1;sy<=1;sy++) for(let sx=-1;sx<=1;sx++){
                 const nx2=cx+sx, ny2=cy+sy;
-                if(nx2>=0&&nx2<GRID_W&&ny2>=0&&ny2<GRID_H) state.grid[ny2][nx2]=1;
+                if(nx2>=0&&nx2<gw&&ny2>=0&&ny2<gh) state.grid[ny2][nx2]=1;
               }
             }
           } else if(editorTool==='spawn2'){
@@ -910,7 +1054,7 @@ export default function App() {
               const botId = editorBotCycle.current;
               for(let sy=-1;sy<=1;sy++) for(let sx=-1;sx<=1;sx++){
                 const nx2=cx+sx, ny2=cy+sy;
-                if(nx2>=0&&nx2<GRID_W&&ny2>=0&&ny2<GRID_H) state.grid[ny2][nx2]=botId;
+                if(nx2>=0&&nx2<gw&&ny2>=0&&ny2<gh) state.grid[ny2][nx2]=botId;
               }
               editorBotCycle.current = botId>=4 ? 2 : botId+1;
             }
@@ -922,14 +1066,16 @@ export default function App() {
     }
 
     // Paint
+    if(panStatus.current.active) return; // Prevent painting while moving camera
     if(!isMouseDown.current&&!isDown)return;
     if(state.player.paintUnits<=0)return;
     const span=BUCKET_UPGRADES[bucketRef.current].radius;
     const painted=[];
     for(let dy=-(span-1);dy<=(span-1);dy++) for(let dx=-(span-1);dx<=(span-1);dx++){
       const x=cx+dx,y=cy+dy;
-      if(x<0||x>=GRID_W||y<0||y>=GRID_H)continue;
-      if(isOwned(state.grid[y][x],1))continue;
+      if(x<0||x>=gw||y<0||y>=gh)continue;
+      const isAllyTile = state.isAlly ? state.isAlly(state.grid[y][x], 1) : isOwned(state.grid[y][x], 1);
+      if(isAllyTile || state.grid[y][x] === 5)continue;
       if(state.grid[y][x]===9 && !settings.passableObstacles)continue;
       if(state.player.paintUnits<=0)break;
       // Fort walls block player paint (unless demo unit later breaks them)
@@ -937,21 +1083,22 @@ export default function App() {
       let adj=false;
       for(const[ay,ax]of[[-1,0],[1,0],[0,-1],[0,1]]){
         const ny2=y+ay,nx2=x+ax;
-        if(ny2>=0&&ny2<GRID_H&&nx2>=0&&nx2<GRID_W&&isOwned(state.grid[ny2][nx2],1)){adj=true;break;}
+        if(ny2>=0&&ny2<gh&&nx2>=0&&nx2<gw&&isOwned(state.grid[ny2][nx2],1)){adj=true;break;}
       }
       if(!adj&&painted.length>0)for(const p of painted)if(Math.abs(p.x-x)<=1&&Math.abs(p.y-y)<=1){adj=true;break;}
       if(!adj)continue;
       const bldIdx=state.buildings.findIndex(b => {
         const bw = BLDG[b.type].w || 1;
         const bh = BLDG[b.type].h || 1;
-        return b.ownerId !== 1 && x >= b.x && x < b.x + bw && y >= b.y && y < b.y + bh;
+        const isEnemy = state.isAlly ? !state.isAlly(b.ownerId, 1) : b.ownerId !== 1;
+        return isEnemy && x >= b.x && x < b.x + bw && y >= b.y && y < b.y + bh;
       });
       if(bldIdx>=0){
         const bld=state.buildings[bldIdx];
         bld.hp--;bld.damageFlash=6;
         if(bld.hp<=0){
           addCocoa(BLDG[bld.type].cocoaReward);
-          if(bld.type==='fort')for(const{x:wx,y:wy}of getBuildingPerimeter(bld.x, bld.y, BLDG.fort.w, BLDG.fort.h))
+          if(bld.type==='fort')for(const{x:wx,y:wy}of getBuildingPerimeter(bld.x, bld.y, BLDG.fort.w, BLDG.fort.h, gw, gh))
             if(state.grid[wy][wx]===FORT_WALL_OFFSET+bld.ownerId)state.grid[wy][wx]=bld.ownerId;
           state.buildings.splice(bldIdx,1);
         }
@@ -968,6 +1115,67 @@ export default function App() {
     }
   },[gameStatus,syncUI,addCocoa,updateGridCache,editorTool,editorBrush]);
 
+  const lastTouchDist = useRef(null);
+  const lastTouchMid = useRef(null);
+
+  const handleTouchStart = useCallback((e) => {
+    if (e.touches.length === 1) {
+      isMouseDown.current = true;
+      handleCanvasClick(e.touches[0], true);
+    } else if (e.touches.length === 2) {
+      isMouseDown.current = false;
+      const t1 = e.touches[0], t2 = e.touches[1];
+      lastTouchDist.current = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
+      lastTouchMid.current = { x: (t1.clientX + t2.clientX) / 2, y: (t1.clientY + t2.clientY) / 2 };
+    }
+  }, [handleCanvasClick]);
+
+  const handleTouchMove = useCallback((e) => {
+    if (e.touches.length === 1 && isMouseDown.current) {
+      if (e.cancelable) e.preventDefault();
+      handleCanvasClick(e.touches[0], false);
+    } else if (e.touches.length === 2 && lastTouchDist.current && lastTouchMid.current) {
+      if (e.cancelable) e.preventDefault();
+      const t1 = e.touches[0], t2 = e.touches[1];
+      const dist = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
+      const mid = { x: (t1.clientX + t2.clientX) / 2, y: (t1.clientY + t2.clientY) / 2 };
+      
+      const zoomFactor = dist / lastTouchDist.current;
+      const nextZoom = clamp(zoom * zoomFactor, 0.4, 2.5);
+      
+      const v = viewportRef.current;
+      const rect = v.getBoundingClientRect();
+      performZoom(nextZoom, mid.x - rect.left, mid.y - rect.top);
+
+      if (v) {
+        v.scrollLeft -= (mid.x - lastTouchMid.current.x);
+        v.scrollTop -= (mid.y - lastTouchMid.current.y);
+      }
+
+      lastTouchDist.current = dist;
+      lastTouchMid.current = mid;
+    }
+  }, [zoom, performZoom, handleCanvasClick]);
+
+  const handleTouchEnd = useCallback(() => {
+    isMouseDown.current = false;
+    lastTouchDist.current = null;
+    lastTouchMid.current = null;
+  }, []);
+
+  useEffect(() => {
+    const c = canvasRef.current;
+    if (!c) return;
+    c.addEventListener('touchstart', handleTouchStart, { passive: false });
+    c.addEventListener('touchmove', handleTouchMove, { passive: false });
+    c.addEventListener('touchend', handleTouchEnd);
+    return () => {
+      c.removeEventListener('touchstart', handleTouchStart);
+      c.removeEventListener('touchmove', handleTouchMove);
+      c.removeEventListener('touchend', handleTouchEnd);
+    };
+  }, [handleTouchStart, handleTouchMove, handleTouchEnd]);
+
   // ── Purchase helpers ───────────────────────────────────────────────────────
   const handleCraftPaint=()=>{
     if(gameStatus!=='playing')return;
@@ -979,22 +1187,25 @@ export default function App() {
   const buyBuilding=(type)=>{
     const p=stateRef.current.player;
     const def=BLDG[type]; const costK=def.costKey; const cntK=def.countKey;
-    if(p.potatoes<p[costK])return;
-    p.potatoes-=p[costK]; p[cntK]++; p[costK]=Math.floor(p[costK]*def.baseMul);
-    const tiles=findTiles(stateRef.current.grid,1);
+    const cost = p[costK];
+    if(p.potatoes<cost)return;
+    
+    const isNaval = type === 'navalport';
+    const tiles=isNaval ? findTiles(stateRef.current.grid, 5).filter(t => [[-1,0],[1,0],[0,-1],[0,1]].some(([dy,dx]) => isOwned(stateRef.current.grid[t.y+dy]?.[t.x+dx], 1))) : findTiles(stateRef.current.grid, 1);
     if(!tiles.length)return;
+
     const bw = def.w || 1;
     const bh = def.h || 1;
-    // Try to find a valid placement spot
     let placed = false;
     for(let attempt=0;attempt<30&&!placed;attempt++){
       const tile=tiles[rnd(tiles.length)];
-      if(canPlaceBuilding(stateRef.current.grid,tile.x,tile.y,bw,bh,1,stateRef.current.buildings)){
+      if(canPlaceBuilding(stateRef.current.grid,tile.x,tile.y,bw,bh,1,stateRef.current.buildings, isNaval)){
+        p.potatoes-=cost; p[cntK]++; p[costK]=Math.floor(cost*def.baseMul);
         const bld={x:tile.x,y:tile.y,type,ownerId:1,hp:def.hp,damageFlash:0};
         stateRef.current.buildings.push(bld);
         placed=true;
         if(type==='fort'){
-          for(const{x,y}of getBuildingPerimeter(tile.x, tile.y, bw, bh)){
+          for(const{x,y}of getBuildingPerimeter(tile.x, tile.y, bw, bh, stateRef.current.width, stateRef.current.height)){
             if(stateRef.current.grid[y][x]===1) stateRef.current.grid[y][x]=FORT_WALL_OFFSET+1;
           }
         }
@@ -1010,7 +1221,8 @@ export default function App() {
     if(p.potatoes<p[costK])return;
     if(uDef.advanced&&!p.milbaseAdvanced)return; // Require advanced base
     p.potatoes-=p[costK]; p[costK]=Math.floor(p[costK]*1.4);
-    const t=findBorderTile(stateRef.current.grid,1)||findTiles(stateRef.current.grid,1)[0];
+    const isNaval = uDef.onWater;
+    const t=isNaval ? findTiles(stateRef.current.grid, 5).find(t => [[-1,0],[1,0],[0,-1],[0,1]].some(([dy,dx]) => isOwned(stateRef.current.grid[t.y+dy]?.[t.x+dx], 1))) : findBorderTile(stateRef.current.grid,1)||findTiles(stateRef.current.grid,1)[0];
     if(!t)return;
     stateRef.current.units.push({
       x:t.x, 
@@ -1029,6 +1241,39 @@ export default function App() {
     syncUI();
   };
 
+  const deployNavalUnit=(type)=>{
+    const p=stateRef.current.player;
+    const uDef=UNITS[type]; const costK=uDef.costKey;
+    if(p.potatoes<p[costK])return;
+    p.potatoes-=p[costK]; p[costK]=Math.floor(p[costK]*1.4);
+    const t=findTiles(stateRef.current.grid, 5).find(t => [[-1,0],[1,0],[0,-1],[0,1]].some(([dy,dx]) => isOwned(stateRef.current.grid[t.y+dy]?.[t.x+dx], 1)));
+    if(!t)return;
+    stateRef.current.units.push({
+      x:t.x, 
+      y:t.y, 
+      visualX: t.x, 
+      visualY: t.y, 
+      ownerId:1, 
+      type, 
+      hp:uDef.hp, 
+      dir:[0,1], 
+      cd:0, 
+      shootFlash:0, 
+      damageFlash:0, 
+      id:Math.random()
+    });
+    syncUI();
+  };
+
+  const upgradeNavalport=()=>{
+    const p=stateRef.current.player;
+    if(p.navalportAdvanced)return;
+    const cost=600;
+    if(p.potatoes<cost)return;
+    p.potatoes-=cost; p.navalportAdvanced=true;
+    setPopup(null); syncUI();
+  };
+
   const upgradeMilbase=()=>{
     const p=stateRef.current.player;
     if(p.milbaseAdvanced)return;
@@ -1038,21 +1283,71 @@ export default function App() {
     setPopup(null); syncUI();
   };
 
+  const giftPotatoes = (amount) => {
+    const s = stateRef.current;
+    if (s.player.potatoes >= amount) {
+      s.player.potatoes -= amount;
+      const teammate = s.bots.find(b => b.id === 3);
+      if (teammate) teammate.potatoes += amount;
+      setPopup(null);
+      syncUI();
+    }
+  };
 
+  const startGame=async()=>{
+    // For procedural maps, generate terrain ourselves using proper algorithms
+    // then pass it to createInitialState as a custom map so spawn logic still applies.
+    let mapToUse = customMap;
+    if (settings.mapType === 'procedural' && !customMap) {
+      mapToUse = buildProceduralGrid(GRID_W, GRID_H, settings);
+    } else if (settings.mapType === 'realistic' && !customMap) {
+      try {
+        // Expects maps in public/assets/textures/
+        const img = await loadImage(getTexture(`${settings.worldMap}.png`));
+        mapToUse = parseImageToGrid(img, settings.darkThreshold);
+      } catch (err) {
+        console.warn("Realistic map failed to load, falling back to procedural:", err);
+        mapToUse = buildProceduralGrid(GRID_W, GRID_H, settings);
+      }
+    }
 
-  const startGame=()=>{
-    stateRef.current=createInitialState(settings, customMap);
+    stateRef.current = createInitialState(settings, mapToUse);
+    
+    // Calculate total paintable area for Domination percentage
+    let paintable = 0;
+    for(let y=0; y<stateRef.current.height; y++) {
+      for(let x=0; x<stateRef.current.width; x++) {
+        const cell = stateRef.current.grid[y][x];
+        if (cell !== 5 && cell !== 9) paintable++;
+      }
+    }
+    stateRef.current.totalPaintable = paintable;
+    setTotalPaintable(paintable);
+    setShowPeaceVote(false);
+    
+    // Ensure the troopship cost is initialized if the map logic missed it
+    if (stateRef.current.player.troopshipCost === undefined || stateRef.current.player.troopshipCost === 0) 
+      stateRef.current.player.troopshipCost = 150;
+
+    const { width: newW, height: newH } = stateRef.current;
+    setDims({ w: newW, h: newH });
+    // Ensure the off-screen grid canvas is sized BEFORE updateGridCache draws into it
+    ensureGridCacheSize(newW, newH);
     setGameStatus('playing');
     syncUI();
     updateGridCache();
   };
 
   const enterEditor=()=>{
+    const w = customMap ? customMap[0].length : GRID_W;
+    const h = customMap ? customMap.length : GRID_H;
     stateRef.current = { 
-      grid: customMap ? customMap.map(r=>[...r]) : Array.from({length:GRID_H},()=>Array(GRID_W).fill(0)),
+      grid: customMap ? customMap.map(r=>[...r]) : Array.from({length:h},()=>Array(w).fill(0)),
+      width: w, height: h,
       buildings: [], units: [],
       settings: { ...settings, gameMode: 'classic' }
     };
+    setDims({ w, h });
     updateGridCache();
     setGameStatus('editor');
   };
@@ -1062,22 +1357,6 @@ export default function App() {
     setCustomMap(g.map(r=>[...r]));
     localStorage.setItem('customMap', JSON.stringify(g));
     setGameStatus('menu');
-  };
-
-  // Upload image as visual background only
-  const handleBGUpload = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const base64 = event.target.result;
-      localStorage.setItem('customBG', base64);
-      setCustomBG(base64);
-      const img = new Image();
-      img.src = base64;
-      img.onload = () => setLoadedImages(prev => ({ ...prev, background: img }));
-    };
-    reader.readAsDataURL(file);
   };
 
   // Upload image and PARSE it into the game grid using pixel brightness
@@ -1092,11 +1371,10 @@ export default function App() {
       img.src = base64;
       img.onload = () => {
         // Parse pixel data → grid
-        const parsedGrid = parseImageToGrid(img, settings.darkThreshold ?? 60);
-        // Also set as background so you can see it in-game
-        localStorage.setItem('customBG', base64);
-        setCustomBG(base64);
-        setLoadedImages(prev => ({ ...prev, background: img }));
+        const parsedGrid = parseImageToGrid(img, settings.darkThreshold ?? 60, settings);
+        const nw = parsedGrid[0].length;
+        const nh = parsedGrid.length;
+        setDims({ w: nw, h: nh });
         // Save grid as custom map
         setCustomMap(parsedGrid);
         localStorage.setItem('customMap', JSON.stringify(parsedGrid));
@@ -1107,8 +1385,12 @@ export default function App() {
     reader.readAsDataURL(file);
   };
 
-  // Keep old name as alias for any remaining references
-  const handleImageUpload = handleBGUpload;
+  const resetRound = () => {
+    localStorage.removeItem('customMap');
+    localStorage.removeItem('customBG');
+    setCustomMap(null);
+    setGameStatus('menu');
+  };
 
   const formatTime=t=>{const s=Math.max(0,settings.duration-Math.floor(t/10));return`${Math.floor(s/60)}:${(s%60).toString().padStart(2,'0')}`;};
   const togglePanel=p=>setPanelOpen(prev=>({units:false,buildings:false,[p]:!prev[p]}));
@@ -1116,40 +1398,46 @@ export default function App() {
   const canBuyAdvanced=ui.milbases>0&&!ui.milbaseAdvanced;
 
   return (
-    <div style={{fontFamily:"'Segoe UI',system-ui,sans-serif"}} className="min-h-screen bg-slate-100 text-slate-800 flex flex-col p-3 md:p-5">
+    <div className="app-wrapper">
 
       {/* Header */}
-      <header className="mb-3 flex items-center justify-between flex-wrap gap-2">
+      <header className="game-header">
         <h1 className="text-2xl font-black text-blue-600 flex items-center gap-2">
           <PaintBucket size={24} strokeWidth={2.5}/> PaintBlitz.io
         </h1>
         <div className="flex items-center gap-2 flex-wrap">
-          <div className="bg-amber-50 border border-amber-200 px-3 py-1 rounded-full flex items-center gap-1.5 text-sm font-bold text-amber-700">🫘 {fmt(cocoaBeans)}</div>
+          {isMobile && gameStatus === 'playing' && (
+            <div className="header-stats-scroll">
+              <button onClick={handleCraftPaint} className="header-stat-paint">🪣 {fmt(ui.paintUnits)}</button>
+              <div className="header-stat-potatoes">🥔 {fmt(ui.potatoes)}</div>
+            </div>
+          )}
+          <div className="header-stat-beans bg-amber-50 border border-amber-200 px-3 py-1 rounded-full flex items-center gap-1.5 text-sm font-bold text-amber-700">🫘 {fmt(cocoaBeans)}</div>
           {gameStatus==='playing'&&settings.duration>0&&(
-            <span className="bg-white px-3 py-1 rounded-full text-sm font-bold shadow-sm border border-slate-200 flex items-center gap-1"><Clock size={13}/> {formatTime(ui.tickCount)}</span>
+            <span className="header-stat-timer bg-white px-3 py-1 rounded-full text-sm font-bold shadow-sm border border-slate-200 flex items-center gap-1"><Clock size={13}/> {formatTime(ui.tickCount)}</span>
           )}
           {gameStatus==='playing'&&(
-            <span className="bg-white px-3 py-1 rounded-full text-sm font-bold shadow-sm border border-slate-200 text-slate-500">{ui.pixels} px</span>
+            <span className="header-stat-pixels bg-white px-3 py-1 rounded-full text-sm font-bold shadow-sm border border-slate-200 text-slate-500">{ui.pixels} px</span>
           )}
         </div>
       </header>
 
-      <div className="flex flex-col lg:flex-row gap-4 items-start max-w-[1400px] mx-auto w-full">
-
+      <div className="game-layout">
+          {/* Sidebar (Hidden on mobile, content moved to bottom GUI) */}
         {/* Sidebar */}
-        <aside className="w-full lg:w-72 shrink-0 flex flex-col gap-3">
+        <aside className="sidebar-container">
 
           {/* Stats */}
-          <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
+          <div className="sidebar-card">
             <div className="grid grid-cols-2 gap-3">
-              <div className="bg-slate-50 p-3 rounded-xl flex flex-col items-center border border-slate-100">
+              <div className="income-card bg-slate-50 p-3 rounded-xl flex flex-col items-center border border-slate-100">
                 <span className="text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1">Potatoes</span>
                 <span className="text-xl font-black text-slate-700">{fmt(ui.potatoes)} 🥔</span>
                 <span className="text-[10px] text-emerald-500 font-bold bg-emerald-50 px-2 py-0.5 rounded-full mt-1">
                   +{Math.floor((ui.pixels+ui.farms*10)*(1+0.2*ui.infrastructures))}/s
                 </span>
               </div>
-              <div className="bg-blue-50 p-3 rounded-xl flex flex-col items-center border border-blue-100">
+              <div className="paint-status-card bg-blue-50 p-3 rounded-xl flex flex-col items-center border border-blue-100">
                 <span className="text-blue-400 text-[10px] font-bold uppercase tracking-wider mb-1">Paint</span>
                 <span className="text-xl font-black text-blue-600">{fmt(ui.paintUnits)} 🪣</span>
                   {ui.paintUnits===0&&gameStatus==='playing'&&<span className="text-[10px] text-red-500 font-bold mt-1 animate-pulse">EMPTY!</span>}
@@ -1165,16 +1453,16 @@ export default function App() {
 
           {/* Produce Paint */}
           <button onClick={handleCraftPaint} disabled={gameStatus!=='playing'}
-            className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-bold py-3 rounded-xl shadow active:scale-[0.98] transition-all flex flex-col items-center border-b-4 border-blue-800 active:border-b-0 active:translate-y-1">
+            className="paint-produce-btn w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-bold py-3 rounded-xl shadow active:scale-[0.98] transition-all flex flex-col items-center border-b-4 border-blue-800 active:border-b-0 active:translate-y-1">
             <div className="flex items-center gap-2 text-base"><PaintBucket size={18}/> Produce Paint</div>
             <span className="text-blue-200 text-xs">+{paintPerClick} uses</span>
           </button>
 
           {/* ── Units Panel ── */}
-          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+          <div className="sidebar-panel">
             <button onClick={()=>togglePanel('units')} className="w-full flex items-center justify-between px-4 py-3 font-bold text-slate-700 hover:bg-slate-50 transition-colors">
               <span className="flex items-center gap-2 text-sm">
-                <Sword size={15} className="text-red-500"/> Army Units {/* Changed 🏢 to text */}
+                <Sword size={15} className="text-red-500"/> Army Units (Top)
                 {ui.milbases===0&&gameStatus==='playing'&&<span className="bg-orange-100 text-orange-600 text-[10px] font-bold px-2 py-0.5 rounded-full">Needs 🏢</span>}
               </span>
               {panelOpen.units?<ChevronUp size={15}/>:<ChevronDown size={15}/>}
@@ -1186,26 +1474,26 @@ export default function App() {
                     Build a 🏢 Military Base first to train units!
                   </div>
                 )}
-                <div className="mt-3 grid grid-cols-1 gap-2">
+                <div className="unit-list mt-3 grid grid-cols-1 gap-2">
                   {Object.entries(UNITS).map(([type,uDef])=>{
                     const cost=ui[uDef.costKey]; const count=ui.unitCounts[type]||0;
                     const locked=uDef.advanced&&!ui.milbaseAdvanced;
                     const noBase=ui.milbases===0;
                     const canBuy=gameStatus==='playing'&&!locked&&!noBase&&ui.potatoes>=cost;
                     return(
-                      <div key={type} className={`flex items-center gap-3 p-2.5 rounded-xl border transition-all ${locked?'border-purple-200 bg-purple-50':noBase?'border-slate-200 bg-slate-50':'border-slate-200 bg-slate-50'}`}>
-                        <img src={getTexture(uDef.sprite)} alt={type} className="w-6 h-6 object-contain" />
-                        <div className="flex-1 min-w-0">
+                      <div key={type} className={`unit-card ${locked ? 'unit-card--locked' : ''} ${noBase ? 'unit-card--disabled' : ''}`}>
+                        <img src={getTexture(uDef.sprite)} alt={type} className="unit-card-icon" />
+                        <div className="unit-card-content">
                           <div className="flex items-center gap-1.5">
-                            <span className="text-xs font-black text-slate-700 capitalize">{type}</span>
-                            {uDef.advanced&&<span className="bg-purple-100 text-purple-600 text-[9px] font-bold px-1.5 rounded-full">ADV</span>}
-                            {count>0&&<span className="bg-slate-200 text-slate-600 text-[9px] font-bold px-1.5 rounded-full">{count} out</span>}
+                            <span className="unit-card-name">{type}</span>
+                            {uDef.advanced&&<span className="badge-advanced">ADV</span>}
+                            {count>0&&<span className="unit-card-badge">{count} out</span>}
                           </div>
-                          <div className="text-[9px] text-slate-400">{uDef.desc} · ❤️{uDef.hp} atk:{uDef.atk}</div>
-                          {locked&&<div className="text-[9px] text-purple-500 font-bold">Upgrade base to unlock</div>}
+                          <div className="unit-card-stats">{uDef.desc} · ❤️{uDef.hp} atk:{uDef.atk}</div>
+                          {locked&&<div className="unit-card-lock-msg">Upgrade base to unlock</div>}
                         </div>
-                        <button onClick={()=>deployUnit(type)} disabled={!canBuy}
-                          className={`shrink-0 text-[10px] font-bold px-2 py-1.5 rounded-lg transition-all ${canBuy?'bg-red-500 hover:bg-red-600 text-white':'bg-slate-200 text-slate-400 cursor-not-allowed'}`}>
+                        <button onClick={()=>deployUnit(type)} disabled={!canBuy} 
+                          className={`unit-buy-btn ${canBuy ? 'unit-buy-btn--active' : 'unit-buy-btn--disabled'}`}>
                           {fmt(cost)}🥔
                         </button>
                       </div>
@@ -1217,36 +1505,39 @@ export default function App() {
           </div>
 
           {/* ── Buildings Panel ── */}
-          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+          <div className="sidebar-panel">
             <button onClick={()=>togglePanel('buildings')} className="w-full flex items-center justify-between px-4 py-3 font-bold text-slate-700 hover:bg-slate-50 transition-colors">
-              <span className="flex items-center gap-2 text-sm"><Building2 size={15} className="text-emerald-500"/> Buildings</span>
+              <span className="flex items-center gap-2 text-sm"><Building2 size={15} className="text-emerald-500"/> Buildings (Top)</span>
               {panelOpen.buildings?<ChevronUp size={15}/>:<ChevronDown size={15}/>}
             </button>
             {panelOpen.buildings&&(
               <div className="px-3 pb-4 border-t border-slate-100">
-                <div className="mt-3 grid grid-cols-2 gap-2">
+                <div className="building-grid mt-3 grid grid-cols-2 gap-2">
                   {[
                     {type:'factory',color:'emerald',cb:()=>buyBuilding('factory')},
                     {type:'farm',   color:'amber',  cb:()=>buyBuilding('farm')},
                     {type:'fort',   color:'slate',  cb:()=>buyBuilding('fort')},
                     {type:'infra',  color:'indigo', cb:()=>buyBuilding('infra')},
-                    {type:'milbase',color:'purple', cb:()=>buyBuilding('milbase')},
+                    {type:'milbase',color:'purple', cb:()=>{ if(ui.milbases>0){ const mb=stateRef.current?.buildings.find(b=>b.type==='milbase'&&b.ownerId===1); setPopup({type:'milbase',building:mb||null}); } else buyBuilding('milbase'); }},
+                    {type:'navalport', color:'indigo', cb:()=>buyBuilding('navalport')},
                     {type:'tower',  color:'rose',   cb:()=>buyBuilding('tower')},
-                  ].map(({type,color,cb})=>{
-                    const def=BLDG[type]; const cost=ui[def.costKey]; const lvl=ui[def.countKey];
-                    const canBuy=gameStatus==='playing'&&ui.potatoes>=cost;
-                    const cls={emerald:'bg-emerald-500 hover:bg-emerald-600 border-emerald-700',amber:'bg-amber-500 hover:bg-amber-600 border-amber-700',slate:'bg-slate-600 hover:bg-slate-700 border-slate-800',indigo:'bg-indigo-500 hover:bg-indigo-600 border-indigo-700',purple:'bg-purple-600 hover:bg-purple-700 border-purple-800',rose:'bg-rose-500 hover:bg-rose-600 border-rose-700'};
+                  ].filter(item => BLDG[item.type]).map(({type,color,cb})=>{
+                    const def=BLDG[type]; const cost=ui[def?.costKey]; const lvl=ui[def?.countKey];
+                    // Milbase: always clickable if built (to open upgrade popup), otherwise needs funds
+                    const isMilbaseUpgrade = type==='milbase' && ui.milbases>0;
+                    const canBuy=gameStatus==='playing' && (isMilbaseUpgrade || (ui.potatoes>=cost && (type!=='navalport' || (stateRef.current && findTiles(stateRef.current.grid, 5).length > 0))));
                     return(
                       <button key={type} onClick={cb} disabled={!canBuy}
-                        className={`flex flex-col items-center p-3 rounded-xl border-b-4 transition-all active:translate-y-1 active:border-b-0 ${canBuy?cls[color]+' text-white':'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'}`}>
+                        className={`building-card building-card--${color}`}>
                         <img src={getTexture(def.sprite)} alt={type} className="w-8 h-8 mb-1 object-contain" />
                         <span className="text-[11px] font-black capitalize">{type==='milbase'?'Mil.Base':type}</span>
                         <span className="text-[9px] opacity-80">{def.desc}</span>
                         <span className="text-[9px] opacity-50 mb-1">HP:{def.hp}</span>
-                        <div className="bg-black/10 px-2 py-0.5 rounded-full text-[10px] font-bold w-full text-center">{fmt(cost)}🥔</div>
+                        <div className="bg-black/10 px-2 py-0.5 rounded-full text-[10px] font-bold w-full text-center">{isMilbaseUpgrade?'⚙️ Manage':''+fmt(cost)+'🥔'}</div>
                         {lvl>0&&<span className="text-[9px] mt-1 opacity-70">×{lvl}</span>}
                         {type==='milbase'&&ui.milbaseAdvanced&&<span className="text-[9px] mt-0.5 text-yellow-200 font-bold">⭐ ADV</span>}
-                        {type==='milbase'&&!ui.milbaseAdvanced&&ui.milbases>0&&<span className="text-[9px] mt-0.5 opacity-60">tap to upgrade</span>}
+                        {type==='milbase'&&!ui.milbaseAdvanced&&ui.milbases>0&&<span className="text-[9px] mt-0.5 opacity-80 font-bold">⬆ Upgrade</span>}
+                        {type==='navalport' && stateRef.current && !findTiles(stateRef.current.grid, 5).length && <span className="text-[8px] mt-1 text-red-300">No Water</span>}
                       </button>
                     );
                   })}
@@ -1259,15 +1550,16 @@ export default function App() {
           </div>
 
           {/* Leaderboard */}
-          <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
+          <div className="sidebar-card">
             <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-2"><Trophy size={13}/> Leaderboard</h2>
             <div className="flex flex-col gap-1.5">
               {ui.leaderboard.map((e,i)=>(
-                <div key={e.id} className="flex justify-between items-center px-2 py-1.5 rounded-lg bg-slate-50">
+                <div key={e.id} className="leaderboard-row">
                   <div className="flex items-center gap-2 text-sm font-medium">
                     <span className="text-xs text-slate-400 w-3">{i+1}.</span>
-                    <div className="w-2.5 h-2.5 rounded-full" style={{backgroundColor:e.color}}/>
+                    <div className="leaderboard-dot" style={{backgroundColor:e.color}}/>
                     <span className={e.id===1?'text-blue-600 font-bold':'text-slate-600'}>{e.name}</span>
+                    {e.team&&<span className={`text-[9px] font-black px-1.5 rounded-full ${e.team==='A'?'bg-blue-100 text-blue-600':'bg-red-100 text-red-600'}`}>T{e.team}</span>}
                   </div>
                   <span className="text-xs font-bold text-slate-700">{fmt(e.pixels)}</span>
                 </div>
@@ -1277,59 +1569,216 @@ export default function App() {
         </aside>
 
         {/* Canvas */}
-        <main className="flex-1 relative rounded-2xl overflow-hidden shadow-lg border-4 border-white bg-white">
-          <canvas ref={canvasRef} width={GRID_W*CELL_SIZE} height={GRID_H*CELL_SIZE}
-            className="w-full h-auto cursor-crosshair touch-none"
-            onMouseDown={e=>{isMouseDown.current=true;handleCanvasClick(e,true);}}
-            onMouseMove={e=>{if(isMouseDown.current)handleCanvasClick(e,false);}}
-            onMouseLeave={()=>{isMouseDown.current=false;}}
-            onMouseUp={()=>{isMouseDown.current=false;}}/>
+        <main className="canvas-container">
+          {/* Top Control Bar: Outside & Above the interaction viewport */}
+          {(gameStatus === 'playing' || gameStatus === 'editor') && (
+            <div className="canvas-header">
+                <button onClick={resetRound}
+                  className="exit-button">
+                  <LogOut size={14}/> Exit Game
+                </button>
+            </div>
+          )}
+
+          {/* Vertical Zoom Controls positioned center-right */}
+          <div className="zoom-vertical-wrapper">
+            <div className="zoom-control-panel">
+              <button onClick={() => { const v = viewportRef.current; if(v) performZoom(clamp(zoom + 0.2, 0.4, 2.5), v.clientWidth/2, v.clientHeight/2); }} className="zoom-btn" title="Zoom In">
+                <ZoomIn size={18}/>
+              </button>
+              <div className="text-[10px] font-black text-slate-400 select-none py-1">
+                {Math.round(zoom * 100)}%
+              </div>
+              <button onClick={() => { const v = viewportRef.current; if(v) performZoom(clamp(zoom - 0.2, 0.4, 2.5), v.clientWidth/2, v.clientHeight/2); }} className="zoom-btn" title="Zoom Out">
+                <ZoomOut size={18}/>
+              </button>
+              <div className="h-px w-4 bg-slate-100 my-1" />
+              <button onClick={()=>setZoom(1)} className="zoom-btn text-blue-500" title="Reset Zoom">
+                <RotateCcw size={16}/>
+              </button>
+            </div>
+          </div>
+
+          {/* Peace Vote Button */}
+          {showPeaceVote && gameStatus === 'playing' && (
+            <div className="absolute top-16 left-1/2 -translate-x-1/2 z-50 animate-in zoom-in duration-300">
+              <button onClick={() => setGameStatus('victory')} className="peace-vote-btn">
+                <Shield size={20}/> {Math.floor((ui.pixels/totalPaintable)*100)}% DOMINATED: CLAIM VICTORY
+              </button>
+            </div>
+          )}
+
+          {/* Canvas Viewport Area */}
+          <div 
+            ref={viewportRef}
+            onMouseDown={handlePanStart}
+            onMouseMove={handlePanMove}
+            onContextMenu={(e) => e.preventDefault()}
+            className="canvas-viewport custom-scrollbar flex"
+          >
+            {/* 
+                WORLD CONTAINER: This div handles the actual scrollable area calculation.
+                It expands based on the zoom level, solving the "can't scroll to bottom" bug.
+            */}
+            <div className="m-auto relative shadow-2xl" style={{ 
+              width: dims.w * CELL_SIZE * zoom, 
+              height: dims.h * CELL_SIZE * zoom,
+              transition: 'width 0.05s ease-out, height 0.05s ease-out'
+            }}>
+              <canvas 
+                ref={canvasRef} 
+                width={dims.w * CELL_SIZE} 
+                height={dims.h * CELL_SIZE}
+                style={{ 
+                  transform: `scale(${zoom})`, 
+                  transformOrigin: '0 0', 
+                  imageRendering: 'pixelated',
+                  position: 'absolute',
+                  top: 0, left: 0
+                }}
+                className="cursor-crosshair touch-none bg-white"
+                onMouseDown={e=>{if(e.button===0){isMouseDown.current=true;handleCanvasClick(e,true);}}}
+                onMouseMove={e=>{if(isMouseDown.current)handleCanvasClick(e,false);}}
+                onMouseLeave={()=>{isMouseDown.current=false;}}
+                onMouseUp={()=>{isMouseDown.current=false;}}
+              />
+            </div>
+          </div>
 
           {/* In-Canvas Milbase upgrade UI */}
-          {popup?.type==='milbase'&&(
-            <div className="absolute top-4 right-4 w-72 bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden z-40 animate-in fade-in zoom-in duration-200">
-              <div className="bg-slate-800 p-3 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <img src={getTexture('milbase.png')} alt="Milbase" className="w-6 h-6"/>
-                  <span className="text-white font-bold text-sm">Military Ops</span>
+          {popup?.type==='milbase' && (
+            <div className="popup-overlay--transparent">
+              <div onMouseDown={e=>e.stopPropagation()} className="popup-card animate-in zoom-in duration-200">
+                <div className="bg-slate-800 p-4 flex items-center justify-between">
+                  <div className="popup-headerbox">
+                    <img src={getTexture('milbase.png')} alt="Milbase" className="w-8 h-8"/>
+                    <span className="popup-title">Military Operations</span>
+                  </div>
+                  <button onClick={()=>setPopup(null)} className="text-slate-400 hover:text-white transition-colors"><X size={20}/></button>
                 </div>
-                <button onClick={()=>setPopup(null)} className="text-slate-400 hover:text-white"><X size={18}/></button>
-              </div>
-              <div className="p-4 space-y-3">
-                <div className="bg-slate-50 rounded-xl p-2.5 text-[10px] space-y-1.5 border border-slate-100">
-                  <div className="font-bold text-slate-500 uppercase tracking-tight">Available Units:</div>
-                  {Object.entries(UNITS).map(([k,v])=>(
-                    <div key={k} className={`flex items-center gap-2 ${v.advanced&&!ui.milbaseAdvanced?'opacity-40':''}`}>
-                      <img src={getTexture(v.sprite)} alt={k} className="w-3.5 h-3.5"/>
-                      <span className="font-bold text-slate-700">{k}</span>
-                      {v.advanced&&<span className="text-[8px] text-purple-500 font-bold">[ADV]</span>}
+                <div className="p-6 space-y-4">
+                  <div className="bg-slate-50 rounded-2xl p-4 border border-slate-100">
+                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Available Personnel:</div>
+                    <div className="grid grid-cols-2 gap-3">
+                      {Object.entries(UNITS).filter(([_,v])=>!v.onWater).map(([k,v])=>(
+                        <div key={k} className={`flex items-center gap-2 p-2 rounded-lg bg-white border border-slate-100 ${v.advanced&&!ui.milbaseAdvanced?'opacity-40':''}`}>
+                          <img src={getTexture(v.sprite)} alt={k} className="w-5 h-5"/>
+                          <span className="text-[11px] font-bold text-slate-700 capitalize">{k}</span>
+                          {v.advanced&&<span className="text-[8px] text-purple-500 font-bold ml-auto">ADV</span>}
+                        </div>
+                      ))}
                     </div>
-                  ))}
+                  </div>
+                  {!ui.milbaseAdvanced?(
+                    <button onClick={upgradeMilbase} disabled={ui.potatoes<600}
+                      className="upgrade-btn">
+                      <ArrowUp size={18}/> UPGRADE BASE (600 🥔)
+                    </button>
+                  ):(
+                    <div className="text-center py-3 bg-purple-50 text-purple-600 font-black text-xs rounded-2xl border-2 border-dashed border-purple-200 uppercase tracking-wider">
+                      ⭐ Advanced Training Active
+                    </div>
+                  )}
                 </div>
-                {!ui.milbaseAdvanced?(
-                  <button onClick={upgradeMilbase} disabled={ui.potatoes<600}
-                    className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold py-2 rounded-xl flex items-center justify-center gap-2 text-xs transition-all">
-                    <ArrowUp size={14}/> Upgrade Base (600 🥔)
-                  </button>
-                ):(
-                  <div className="text-center py-2 bg-purple-50 text-purple-600 font-bold text-[10px] rounded-lg border border-purple-100">⭐ Advanced Base Active</div>
-                )}
+              </div>
+            </div>
+          )}
+
+          {/* Gift Potatoes Tooltip Popup */}
+          {popup?.type === 'gift' && (
+            <div className={isMobile ? "fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm" : "fixed z-[100] pointer-events-none"} style={isMobile ? {} : { left: popup.x, top: popup.y }}>
+              <div className={`pointer-events-auto bg-white/95 rounded-2xl shadow-2xl border border-amber-200 p-3 flex flex-col items-center gap-2 animate-in fade-in zoom-in duration-150 ${isMobile ? '' : '-translate-x-1/2 -translate-y-full mb-4'}`} style={{ width: isMobile ? '220px' : '150px' }}>
+                <div className="text-[9px] font-black text-amber-600 uppercase tracking-widest">Team Logistics</div>
+                <button 
+                  onClick={() => giftPotatoes(100)}
+                  disabled={ui.potatoes < 100}
+                  className="w-full flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-600 disabled:bg-slate-200 text-white font-bold py-2 rounded-xl shadow-sm transition-all active:scale-95"
+                >
+                  <ArrowUp size={14} />
+                  <span className="text-xs">Gift 100 🥔</span>
+                </button>
+                <button onClick={() => setPopup(null)} className="text-[8px] font-bold text-slate-400 hover:text-slate-600 p-1">
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* In-Canvas Navalport popup UI */}
+          {popup?.type==='navalport' && (
+            <div className="popup-overlay--transparent">
+              <div onMouseDown={e=>e.stopPropagation()} className="popup-card animate-in zoom-in duration-200">
+                <div className="bg-blue-800 p-4 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <Ship size={24} className="text-white"/>
+                    <span className="text-white font-black text-base">Naval Command</span>
+                  </div>
+                  <button onClick={()=>setPopup(null)} className="text-blue-300 hover:text-white transition-colors"><X size={20}/></button>
+                </div>
+                <div className="p-6 space-y-4">
+                  <div className="space-y-2">
+                    {/* Basic Ships */}
+                    <div className="grid grid-cols-1 gap-2">
+                      {[
+                        {type:'frigate', cost:ui.frigateCost, icon: <Waves size={16}/>},
+                        {type:'troopship', cost:ui.troopshipCost, icon: <Ship size={16}/>},
+                      ].map(s=>(
+                        <div key={s.type} className="bg-blue-50 rounded-xl p-3 border border-blue-100 flex items-center gap-3">
+                          <div className="text-blue-600">{s.icon}</div>
+                          <div className="flex-1">
+                            <div className="text-xs font-black text-slate-700 capitalize">{s.type}</div>
+                            <div className="text-[9px] text-slate-500">{UNITS[s.type].desc}</div>
+                          </div>
+                          <button onClick={()=>deployNavalUnit(s.type)} disabled={ui.potatoes < s.cost}
+                            className="shrink-0 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 text-white font-bold py-1.5 px-3 rounded-lg text-[10px] shadow-sm">
+                            {fmt(s.cost)}🥔
+                          </button>
+                        </div>
+                      ))}
+                      {/* Advanced Ships */}
+                      {ui.navalportAdvanced && (
+                        <div className="bg-indigo-50 rounded-xl p-3 border border-indigo-100 flex items-center gap-3">
+                          <div className="text-indigo-600"><Shield size={16}/></div>
+                          <div className="flex-1">
+                            <div className="text-xs font-black text-slate-700 capitalize">Battleship</div>
+                            <div className="text-[9px] text-slate-500">{UNITS.battleship.desc}</div>
+                          </div>
+                          <button onClick={()=>deployNavalUnit('battleship')} disabled={ui.potatoes < ui.battleshipCost}
+                            className="shrink-0 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 text-white font-bold py-1.5 px-3 rounded-lg text-[10px] shadow-sm">
+                            {fmt(ui.battleshipCost)}🥔
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {!ui.navalportAdvanced ? (
+                    <button onClick={upgradeNavalport} disabled={ui.potatoes < 600}
+                      className="upgrade-btn">
+                      <ArrowUp size={18}/> UPGRADE SHIPYARD (600 🥔)
+                    </button>
+                  ) : (
+                    <div className="text-center py-3 bg-indigo-50 text-indigo-600 font-black text-xs rounded-2xl border-2 border-dashed border-indigo-200 uppercase tracking-wider">
+                      ⭐ Advanced Fleet Unlocked
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           )}
 
           {/* Menu */}
           {gameStatus==='menu'&&(
-            <div className="absolute inset-0 bg-slate-900/85 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-              <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden">
-                <div className="flex border-b border-slate-200">
-                  <button onClick={()=>setMenuTab('setup')} className={`flex-1 py-3.5 text-sm font-bold flex items-center justify-center gap-2 transition-colors ${menuTab==='setup'?'text-blue-600 border-b-2 border-blue-600 bg-blue-50/40':'text-slate-500 hover:bg-slate-50'}`}>
+            <div className="menu-overlay">
+              <div className="menu-modal">
+                <div className="menu-tab-bar">
+                  <button onClick={()=>setMenuTab('setup')} className={`menu-tab-btn ${menuTab==='setup' ? 'menu-tab-btn--active' : 'menu-tab-btn--inactive'}`}>
                     <Settings size={14}/> Game Setup
                   </button>
-                  <button onClick={()=>setMenuTab('editor')} className={`flex-1 py-3.5 text-sm font-bold flex items-center justify-center gap-2 transition-colors ${menuTab==='editor'?'text-emerald-600 border-b-2 border-emerald-600 bg-emerald-50/40':'text-slate-500 hover:bg-slate-50'}`}>
+                  <button onClick={()=>setMenuTab('editor')} className={`menu-tab-btn ${menuTab==='editor' ? 'menu-tab-btn--active' : 'menu-tab-btn--inactive'}`}>
                     <Building2 size={14}/> Map Editor
                   </button>
-                  <button onClick={()=>setMenuTab('upgrade')} className={`flex-1 py-3.5 text-sm font-bold flex items-center justify-center gap-2 transition-colors ${menuTab==='upgrade'?'text-amber-600 border-b-2 border-amber-500 bg-amber-50/40':'text-slate-500 hover:bg-slate-50'}`}>
+                  <button onClick={()=>setMenuTab('upgrade')} className={`menu-tab-btn ${menuTab==='upgrade' ? 'menu-tab-btn--active' : 'menu-tab-btn--inactive'}`}>
                     <ShoppingBag size={14}/> Upgrade Shop
                     <span className="bg-amber-100 text-amber-700 text-[10px] font-black px-1.5 py-0.5 rounded-full">🫘{fmt(cocoaBeans)}</span>
                   </button>
@@ -1337,7 +1786,7 @@ export default function App() {
                 <div className="p-6">
                   {menuTab==='setup'&&(
                     <>
-                      <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 mb-5 space-y-3">
+                      <div className="menu-section-card">
                         {[
                           {label:'Duration',icon:<Clock size={14}/>,key:'duration',opts:[{v:0,l:'Endless'},{v:120,l:'2 min'},{v:300,l:'5 min'}]},
                           {label:'Bots',icon:<Settings size={14}/>,key:'botCount',opts:[{v:1,l:'1 Enemy'},{v:2,l:'2 Enemies'},{v:3,l:'3 Enemies'}]},
@@ -1345,17 +1794,17 @@ export default function App() {
                           {label:'Map Mode',icon:<Building2 size={14}/>,key:'mapType',opts:[{v:'procedural',l:'Procedural'},{v:'realistic',l:'Realistic'},{v:'custom',l:'Custom Map'}]},
                           {label:'Game Mode',icon:<Star size={14}/>,key:'gameMode',opts:[{v:'classic',l:'Classic'},{v:'br',l:'Battle Royale'},{v:'teams',l:'2v2 Teams'}]},
                         ].map(({label,icon,key,opts})=>(
-                          <div key={key} className="flex items-center justify-between">
-                            <label className="font-bold text-slate-600 flex items-center gap-2 text-sm">{icon} {label}</label>
+                          <div key={key} className="menu-row">
+                            <label className="menu-label">{icon} {label}</label>
                             <select value={settings[key]} onChange={e=>setSettings({...settings,[key]:isNaN(Number(e.target.value))?e.target.value:Number(e.target.value)})}
-                              className="bg-white border border-slate-300 text-slate-700 rounded-lg px-2 py-1.5 text-sm font-medium focus:outline-none focus:border-blue-500">
+                              className="menu-select-field">
                               {opts.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}
                             </select>
                           </div>
                         ))}
                       </div>
                       {unlockedBucket>0&&<div className="mb-4 flex items-center gap-2 bg-purple-50 border border-purple-200 rounded-xl px-3 py-2 text-xs font-bold text-purple-700"><Star size={12}/> Active: {BUCKET_UPGRADES[activeBucket].label} Bucket — {BUCKET_UPGRADES[activeBucket].desc}</div>}
-                      <button onClick={startGame} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-black text-lg py-3.5 rounded-xl shadow-lg flex justify-center items-center gap-2">
+                      <button onClick={startGame} className="menu-start-btn">
                         <Play fill="currentColor" size={18}/> START PAINTING
                       </button>
                     </>
@@ -1363,18 +1812,18 @@ export default function App() {
                   {menuTab==='editor'&&(
                     <div className="space-y-3">
                       {/* Sub-tab Navigation */}
-                      <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200">
-                        {['terrain', 'design', 'teams'].map(t => (
+                      <div className="flex bg-slate-100 p-1 rounded-xl">
+                        {['terrain', 'configuration'].map(t => (
                           <button key={t} onClick={() => setEditorSubTab(t)} 
                             className={`flex-1 py-2 text-[10px] font-black uppercase tracking-widest rounded-lg transition-all ${editorSubTab === t ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}>
-                            {t}
+                            {t === 'terrain' ? 'Terrain & Generation' : 'Configuration'}
                           </button>
                         ))}
                       </div>
 
                       {editorSubTab === 'terrain' && (
                         <div className="space-y-3 animate-in fade-in slide-in-from-bottom-2">
-                          <div className="flex gap-1.5 bg-slate-50 p-1 rounded-xl border border-slate-200">
+                          <div className="flex gap-1.5 bg-slate-50 p-1 rounded-xl">
                             {[{id:'procedural',label:'🎲 Procedural'},{id:'realistic',label:'🌍 Realistic'},{id:'custom',label:'✍️ Custom'}].map(m=>(
                               <button key={m.id} onClick={()=>setSettings(s=>({...s,mapType:m.id}))}
                                 className={`flex-1 py-1.5 rounded-lg text-[10px] font-black transition-all ${settings.mapType===m.id?'bg-white text-emerald-700 shadow-sm':'text-slate-400 hover:text-slate-600'}`}>
@@ -1395,9 +1844,16 @@ export default function App() {
                                   <div className="space-y-1">
                                     <label className="text-[9px] font-black text-slate-400 uppercase">Terrain Type</label>
                                     <select value={settings.terrainType} onChange={e=>setSettings(s=>({...s, terrainType: e.target.value}))} className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 text-xs">
-                                      <option value="scattered">Scattered Dots</option>
-                                      <option value="grouped">Large Groups</option>
                                       <option value="maze">Maze Pathing</option>
+                                      <option value="highlands">Highlands (Rugged)</option>
+                                      <option value="desert">Desert (Barren)</option>
+                                      <option value="mountainous">Mountainous & Cliffs</option>
+                                      <option value="sea">Sea (Island Cluster)</option>
+                                      <option value="pangea">Pangea (Center Land)</option>
+                                      <option value="archipelago">Archipelago (Islands)</option>
+                                      <option value="island_kingdom">Island Kingdom</option>
+                                      <option value="giant_island">Giant Island</option>
+                                      <option value="halo">Halo Ring</option>
                                     </select>
                                   </div>
                                 </div>
@@ -1420,10 +1876,14 @@ export default function App() {
                                     <input type="text" value={settings.seed} onChange={e=>setSettings(s=>({...s, seed: e.target.value}))} className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 text-xs font-mono"/>
                                   </div>
                                   <div className="space-y-1">
-                                    <label className="text-[9px] font-black text-slate-400 uppercase">Continent Map</label>
-                                    <select value={settings.continentType} onChange={e=>setSettings(s=>({...s, continentType: e.target.value}))} className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 text-xs">
-                                      <option value="pangea">Pangea (Center)</option>
-                                      <option value="archipelago">Archipelago (Islands)</option>
+                                    <label className="text-[9px] font-black text-slate-400 uppercase">World Map</label>
+                                    <select value={settings.worldMap} onChange={e=>setSettings(s=>({...s, worldMap: e.target.value}))} className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 text-xs">
+                                      <option value="worldmap">Full World Map</option>
+                                      <option value="wm_asia">Asia</option>
+                                      <option value="wm_europe">Europe</option>
+                                      <option value="wm_africa">Africa</option>
+                                      <option value="wm_northamerica">North America</option>
+                                      <option value="wm_southamerica">South America</option>
                                     </select>
                                   </div>
                                 </div>
@@ -1461,18 +1921,6 @@ export default function App() {
                                   </div>
                                 </div>
 
-                                {/* Secondary: visual background only */}
-                                <div className="space-y-1">
-                                  <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Background Skin (visual only)</label>
-                                  <div className="flex gap-2">
-                                    <label className="flex-1 cursor-pointer bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg py-1.5 text-[10px] font-bold text-slate-500 flex items-center justify-center gap-1.5 transition-colors">
-                                      <ArrowUp size={12}/> {customBG ? 'Change BG Image' : 'Upload BG Image'}
-                                      <input type="file" accept="image/*" className="hidden" onChange={handleBGUpload}/>
-                                    </label>
-                                    {customBG && <button onClick={()=>{setCustomBG(null);localStorage.removeItem('customBG');}} className="bg-red-50 hover:bg-red-100 text-red-400 px-3 rounded-lg text-xs font-bold transition-colors"><X size={12}/></button>}
-                                  </div>
-                                </div>
-
                                 <div className="flex items-center justify-between bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">
                                   <label className="flex items-center gap-3 cursor-pointer w-full group">
                                     <input 
@@ -1490,17 +1938,31 @@ export default function App() {
                         </div>
                       )}
 
-                      {editorSubTab === 'design' && (
+                      {editorSubTab === 'configuration' && (
                         <div className="space-y-3 animate-in fade-in slide-in-from-bottom-2">
-                          <div className="bg-white border border-slate-200 rounded-xl p-3 space-y-3">
-                            <div className="flex flex-col">
-                              <label className="text-[9px] font-black text-slate-400 uppercase mb-1">Arena Metadata</label>
-                              <input type="text" value={settings.customMapName} onChange={e=>setSettings(s=>({...s, customMapName: e.target.value}))} placeholder="Map Name..." className="w-full text-sm font-bold text-slate-700 focus:outline-none mb-3 bg-slate-50 px-2 py-1.5 rounded-lg"/>
+                          <div className="bg-white border border-slate-200 rounded-xl p-4">
+                            <div className="space-y-3">
+                              <div className="flex flex-col">
+                                <label className="text-[9px] font-black text-slate-400 uppercase mb-1">Arena Metadata</label>
+                                <input type="text" value={settings.customMapName} onChange={e=>setSettings(s=>({...s, customMapName: e.target.value}))} placeholder="Map Name..." className="w-full text-sm font-bold text-slate-700 focus:outline-none bg-slate-50 px-2 py-1.5 rounded-lg border border-slate-100"/>
+                              </div>
+                              <div className="flex gap-2">
+                                <button onClick={enterEditor} className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors shadow-sm">
+                                  <Building2 size={14}/> Open Layout Editor
+                                </button>
+                              </div>
                             </div>
-                            <div className="flex gap-2">
-                              <button onClick={enterEditor} className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors">
-                                <Building2 size={14}/> Layout Editor
-                              </button>
+
+                            <div className="pt-2 border-t border-slate-100">
+                              <label className="text-[9px] font-black text-slate-400 uppercase block mb-3">Team Palette</label>
+                              <div className="flex gap-3">
+                                {[1,2,3,4].map(id=>(
+                                  <div key={id} className="flex flex-col items-center gap-1">
+                                    <input type="color" value={settings.colors[id]} onChange={e=>setSettings(s=>({...s,colors:{...s.colors,[id]:e.target.value}}))} className="w-8 h-8 rounded-lg cursor-pointer border-2 border-slate-100 p-0.5 bg-white shadow-sm hover:scale-105 transition-transform"/>
+                                    <span className="text-[8px] font-black text-slate-400">P{id}</span>
+                                  </div>
+                                ))}
+                              </div>
                             </div>
                           </div>
                           
@@ -1512,25 +1974,11 @@ export default function App() {
                                 )))}
                               </div>
                               <div className="mt-1.5 flex justify-between text-[8px] font-bold text-slate-400 uppercase px-1">
-                                <span>Preview</span>
-                                <span>{GRID_W} × {GRID_H} max</span>
+                                <span>Arena Preview</span>
+                                <span>{dims.w} × {dims.h}</span>
                               </div>
                             </div>
                           )}
-                        </div>
-                      )}
-
-                      {editorSubTab === 'teams' && (
-                        <div className="bg-white border border-slate-200 rounded-xl p-4 animate-in fade-in slide-in-from-bottom-2">
-                          <label className="text-[10px] font-black text-slate-400 uppercase block mb-3">Team Palette</label>
-                          <div className="flex gap-2">
-                            {[1,2,3,4].map(id=>(
-                              <div key={id} className="flex flex-col items-center gap-0.5">
-                                <input type="color" value={settings.colors[id]} onChange={e=>setSettings(s=>({...s,colors:{...s.colors,[id]:e.target.value}}))} className="w-7 h-7 rounded cursor-pointer border-0 p-0 bg-transparent"/>
-                                <span className="text-[8px] font-black text-slate-400">P{id}</span>
-                              </div>
-                            ))}
-                          </div>
                         </div>
                       )}
 
@@ -1538,11 +1986,11 @@ export default function App() {
                     </div>
                   )}
                   {menuTab==='upgrade'&&(
-                    <div className="space-y-4">
+                    <div className="shop-container custom-scrollbar">
                       <p className="text-xs text-slate-400">Earn <span className="font-bold text-amber-600">🫘 Cocoa Beans</span> by destroying enemy buildings. Upgrades persist between games.</p>
-                      <div className="bg-slate-50 rounded-2xl border border-slate-200 p-4">
+                      <div className="menu-section-card">
                         <div className="flex items-center gap-3 mb-3"><span className="text-3xl">🪣</span><div><div className="font-black text-slate-800">Paint Bucket Upgrade</div><div className="text-xs text-slate-400">Larger radius = more area painted per stroke</div></div></div>
-                        <div className="grid grid-cols-4 gap-1.5 mb-4"> {/* Bucket emojis are kept as they were not part of the request */}
+                        <div className="grid grid-cols-4 gap-1.5 mb-4">
                           {BUCKET_UPGRADES.map((u,i)=>{
                             const isUnlocked = i <= unlockedBucket;
                             const isActive = i === activeBucket;
@@ -1572,12 +2020,12 @@ export default function App() {
                               setActiveBucket(next);
                             }
                           }} disabled={cocoaBeans < BUCKET_UPGRADES[unlockedBucket+1].cocoaCost}
-                            className="w-full bg-amber-500 hover:bg-amber-600 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold py-2.5 rounded-xl text-sm flex items-center justify-center gap-2 border-b-4 border-amber-700 active:border-b-0 active:translate-y-1 disabled:border-slate-300">
+                            className="w-full bg-gradient-to-r from-purple-500 to-blue-500 hover:scale-[1.02] disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold py-2.5 rounded-xl text-sm flex items-center justify-center gap-2 border-b-4 border-blue-800 active:border-b-0 active:translate-y-1 disabled:border-slate-300">
                             <Star size={14}/> Buy Next: {BUCKET_UPGRADES[unlockedBucket+1].label}
                             <span className="bg-black/15 px-2 py-0.5 rounded-lg">🫘{BUCKET_UPGRADES[unlockedBucket+1].cocoaCost}</span>
                           </button>
                         ):(
-                          <div className="w-full bg-gradient-to-r from-purple-500 to-blue-500 text-white font-bold py-2.5 rounded-xl text-sm flex items-center justify-center gap-2">
+                          <div className="upgrade-button">
                             <Star size={14} fill="currentColor"/> MAX LEVEL!
                           </div>
                         )}
@@ -1595,21 +2043,80 @@ export default function App() {
                       </div>
                     </div>
                   )}
+
                 </div>
+              </div>
+            </div>
+          )}
+
+          {/* Mobile Bottom GUI — slim Antiyoy-style single-row tray */}
+          {isMobile && gameStatus === 'playing' && (
+            <div className="mobile-bottom-gui">
+              {/* Produce Paint pill — left anchor */}
+              <button onClick={handleCraftPaint} disabled={gameStatus !== 'playing'} className="antiyoy-paint-btn">
+                <PaintBucket size={20}/>
+              </button>
+
+              {/* Scrollable item tray */}
+              <div className="antiyoy-slider">
+
+                {/* ── Divider: Buildings ── */}
+                <span className="antiyoy-divider">🏛</span>
+                {[
+                  { type: 'factory',   cb: () => buyBuilding('factory') },
+                  { type: 'farm',      cb: () => buyBuilding('farm') },
+                  { type: 'fort',      cb: () => buyBuilding('fort') },
+                  { type: 'infra',     cb: () => buyBuilding('infra') },
+                  { type: 'milbase',   cb: () => { if (ui.milbases > 0) { const mb = stateRef.current?.buildings.find(b => b.type === 'milbase' && b.ownerId === 1); setPopup({ type: 'milbase', building: mb || null }); } else buyBuilding('milbase'); } },
+                  { type: 'navalport', cb: () => buyBuilding('navalport') },
+                  { type: 'tower',     cb: () => buyBuilding('tower') },
+                ].filter(item => BLDG[item.type]).map(({ type, cb }) => {
+                  const def = BLDG[type];
+                  const cost = ui[def?.costKey];
+                  const isMilbaseUpgrade = type === 'milbase' && ui.milbases > 0;
+                  const canBuy = gameStatus === 'playing' && (isMilbaseUpgrade || (ui.potatoes >= cost && (type !== 'navalport' || (stateRef.current && findTiles(stateRef.current.grid, 5).length > 0))));
+                  return (
+                    <button key={type} onClick={cb} disabled={!canBuy}
+                      className={`antiyoy-item ${!canBuy ? 'antiyoy-item--disabled' : ''}`}>
+                      <img src={getTexture(def.sprite)} alt={type} className="antiyoy-icon" />
+                      <span className="antiyoy-label">{type === 'milbase' ? 'Base' : type === 'navalport' ? 'Port' : type === 'infra' ? 'Road' : type}</span>
+                      <span className="antiyoy-price-tag">{isMilbaseUpgrade ? '⚙️' : fmt(cost)+'🥔'}</span>
+                    </button>
+                  );
+                })}
+
+                {/* ── Divider: Units ── */}
+                <span className="antiyoy-divider">⚔️</span>
+                {Object.entries(UNITS).map(([type, uDef]) => {
+                  const cost = ui[uDef.costKey];
+                  const count = ui.unitCounts[type] || 0;
+                  const locked = uDef.advanced && !ui.milbaseAdvanced;
+                  const noBase = ui.milbases === 0;
+                  const canBuy = gameStatus === 'playing' && !locked && !noBase && ui.potatoes >= cost;
+                  return (
+                    <button key={type} onClick={() => deployUnit(type)} disabled={!canBuy}
+                      className={`antiyoy-item ${locked ? 'antiyoy-item--locked' : ''} ${(!canBuy && !locked) ? 'antiyoy-item--disabled' : ''}`}>
+                      <img src={getTexture(uDef.sprite)} alt={type} className="antiyoy-icon" />
+                      <span className="antiyoy-label">{type}{count > 0 ? ` ×${count}` : ''}</span>
+                      <span className="antiyoy-price-tag">{locked ? '🔒' : fmt(cost)+'🥔'}</span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
 
           {/* Editor Mode Overlay */}
           {gameStatus==='editor' && (
-            <div className="absolute top-3 left-1/2 -translate-x-1/2 bg-white/97 backdrop-blur-sm rounded-2xl shadow-2xl border border-slate-200 z-50 flex flex-col" style={{minWidth:'640px'}}>
+            <div className="absolute top-3 left-1/2 -translate-x-1/2 bg-white/97 backdrop-blur-sm rounded-2xl shadow-2xl border border-slate-200 z-50 flex flex-col editor-toolbar-responsive">
               {/* Top bar */}
-              <div className="flex items-center gap-3 px-4 py-2.5 border-b border-slate-100">
+              <div className="flex items-center flex-wrap gap-2 px-4 py-2.5 border-b border-slate-100">
                 <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest shrink-0">🗺️ Map Editor</span>
-                <div className="h-4 w-px bg-slate-200"/>
+                <div className="hidden sm:block h-4 w-px bg-slate-200"/>
                 {/* Tool selector */}
                 {[
                   {id:'obstacle', label:'🧱 Obstacle', title:'Draw walls/rocks'},
+                  {id:'water',    label:'🌊 Water',    title:'Draw oceans/rivers'},
                   {id:'erase',    label:'🧹 Erase',    title:'Remove any tile'},
                   {id:'spawn1',   label:'🔵 P1 Spawn', title:'Set player 1 start zone'},
                   {id:'spawn2',   label:'🔴 Bot spawn', title:'Set bot start zones'},
@@ -1620,7 +2127,7 @@ export default function App() {
                     {tool.label}
                   </button>
                 ))}
-                <div className="h-4 w-px bg-slate-200"/>
+                <div className="hidden sm:block h-4 w-px bg-slate-200"/>
                 {/* Brush size */}
                 <div className="flex items-center gap-1.5">
                   <span className="text-[10px] font-bold text-slate-400">Brush</span>
@@ -1632,7 +2139,11 @@ export default function App() {
                   ))}
                 </div>
                 <div className="flex-1"/>
-                <button onClick={()=>{stateRef.current.grid=Array.from({length:GRID_H},()=>Array(GRID_W).fill(0));updateGridCache();}}
+                <button onClick={()=>{
+                  const {width, height} = stateRef.current;
+                  stateRef.current.grid=Array.from({length:height},()=>Array(width).fill(0));
+                  updateGridCache();
+                }}
                   className="bg-slate-100 hover:bg-red-100 hover:text-red-600 text-slate-500 font-bold px-3 py-1.5 rounded-xl text-xs transition-colors">Clear</button>
                 <button onClick={saveEditor}
                   className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-4 py-1.5 rounded-xl text-xs shadow transition-colors">Save Map</button>
@@ -1641,27 +2152,15 @@ export default function App() {
               </div>
               {/* Status bar */}
               <div className="px-4 py-1.5 text-[10px] text-slate-400 font-medium">
-                {{obstacle:'🧱 Click/drag to place obstacles (impassable terrain)',erase:'🧹 Click/drag to erase tiles',spawn1:'🔵 Click to place Player 1 start territory (3×3)',spawn2:'🔴 Click to place bot start territory — each click cycles Bot 1→2→3'}[editorTool]}
+                {{obstacle:'🧱 Click/drag to place obstacles (impassable terrain)',water:'🌊 Click/drag to place water (navigable by ships)',erase:'🧹 Click/drag to erase tiles',spawn1:'🔵 Click to place Player 1 start territory (3×3)',spawn2:'🔴 Click to place bot start territory — each click cycles Bot 1→2→3'}[editorTool]}
               </div>
             </div>
           )}
 
-          {gameStatus==='gameover'&&<Overlay bg="bg-red-900/90" icon={<Skull size={52} className="text-red-400 mx-auto mb-3"/>} title="WIPED OUT" sub="An enemy painted over your last territory." btnColor="bg-white text-red-600" onBack={()=>setGameStatus('menu')}/>}
-          {gameStatus==='victory'&&<Overlay bg="bg-blue-900/90" icon={<Trophy size={52} className="text-yellow-400 mx-auto mb-3"/>} title="DOMINATION" sub="You painted the whole map!" btnColor="bg-yellow-400 text-yellow-900" onBack={()=>setGameStatus('menu')}/>}
-          {gameStatus==='timeup'&&<Overlay bg="bg-indigo-900/90" icon={<Clock size={52} className="text-indigo-300 mx-auto mb-3"/>} title="TIME'S UP!" sub={ui.leaderboard[0]?.id===1?'You won!':`${ui.leaderboard[0]?.name} won!`} btnColor="bg-white text-indigo-900" onBack={()=>setGameStatus('menu')}/>}
+          {gameStatus==='gameover'&&<Overlay bg="bg-red-900/90" icon={<Skull size={52} className="text-red-400 mx-auto mb-3"/>} title="WIPED OUT" sub="An enemy painted over your last territory." btnColor="bg-white text-red-600" onBack={resetRound}/>}
+          {gameStatus==='victory'&&<Overlay bg="bg-blue-900/90" icon={<Trophy size={52} className="text-yellow-400 mx-auto mb-3"/>} title="DOMINATION" sub="You painted the whole map!" btnColor="bg-yellow-400 text-yellow-900" onBack={resetRound}/>}
+          {gameStatus==='timeup'&&<Overlay bg="bg-indigo-900/90" icon={<Clock size={52} className="text-indigo-300 mx-auto mb-3"/>} title="TIME'S UP!" sub={ui.leaderboard[0]?.id===1?'You won!':`${ui.leaderboard[0]?.name} won!`} btnColor="bg-white text-indigo-900" onBack={resetRound}/>}
         </main>
-      </div>
-    </div>
-  );
-}
-
-function Overlay({bg,icon,title,sub,btnColor,onBack}){
-  return(
-    <div className={`absolute inset-0 ${bg} backdrop-blur-md flex items-center justify-center p-4 z-50`}>
-      <div className="text-center">{icon}
-        <h2 className="text-4xl font-black text-white mb-2">{title}</h2>
-        <p className="text-white/70 mb-6 font-medium">{sub}</p>
-        <button onClick={onBack} className={`${btnColor} font-bold py-2.5 px-8 rounded-full shadow-lg hover:scale-105 transition-transform`}>Back to Menu</button>
       </div>
     </div>
   );
