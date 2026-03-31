@@ -1159,8 +1159,6 @@ export default function App() {
     }
   },[gameStatus,syncUI,addCocoa,updateGridCache,editorTool,editorBrush]);
 
-  const lastTouchDist = useRef(null);
-  const lastTouchMid = useRef(null);
   // For distinguishing a tap (paint) from a drag (pan)
   const touchStartPos = useRef(null);
   const touchHasMoved = useRef(false);
@@ -1170,15 +1168,12 @@ export default function App() {
       const t = e.touches[0];
       touchStartPos.current = { x: t.clientX, y: t.clientY };
       touchHasMoved.current = false;
-      isMouseDown.current = false; // don't paint yet — wait to see if it's a tap or drag
+      isMouseDown.current = false;
       panStatus.current = { active: true, x: t.clientX, y: t.clientY };
     } else if (e.touches.length === 2) {
-      // Two-finger pinch-zoom: cancel any ongoing pan/paint
+      // Two fingers: cancel pan/paint — pinch-zoom disabled on mobile
       panStatus.current = { active: false, x: 0, y: 0 };
       isMouseDown.current = false;
-      const t1 = e.touches[0], t2 = e.touches[1];
-      lastTouchDist.current = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
-      lastTouchMid.current = { x: (t1.clientX + t2.clientX) / 2, y: (t1.clientY + t2.clientY) / 2 };
     }
   }, []);
 
@@ -1186,17 +1181,15 @@ export default function App() {
     if (e.cancelable) e.preventDefault();
     if (e.touches.length === 1) {
       const t = e.touches[0];
-      // Check if finger has moved enough to count as a pan (>6px)
       if (touchStartPos.current) {
         const dx = t.clientX - touchStartPos.current.x;
         const dy = t.clientY - touchStartPos.current.y;
         if (!touchHasMoved.current && Math.hypot(dx, dy) > 6) {
           touchHasMoved.current = true;
-          isMouseDown.current = false; // cancel any paint intent
+          isMouseDown.current = false;
         }
       }
       if (touchHasMoved.current && panStatus.current.active && viewportRef.current) {
-        // Pan the viewport
         const dx = t.clientX - panStatus.current.x;
         const dy = t.clientY - panStatus.current.y;
         viewportRef.current.scrollLeft -= dx;
@@ -1204,50 +1197,20 @@ export default function App() {
         panStatus.current.x = t.clientX;
         panStatus.current.y = t.clientY;
       }
-    } else if (e.touches.length === 2 && lastTouchDist.current && lastTouchMid.current) {
-      const t1 = e.touches[0], t2 = e.touches[1];
-      const dist = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
-      const mid = { x: (t1.clientX + t2.clientX) / 2, y: (t1.clientY + t2.clientY) / 2 };
-
-      const v = viewportRef.current;
-      if (!v) return;
-      const rect = v.getBoundingClientRect();
-
-      const zoomFactor = dist / lastTouchDist.current;
-      const nextZoom = clamp(zoom * zoomFactor, 0.4, 2.5);
-
-      // World coordinate under the previous midpoint
-      const lastMidRelX = lastTouchMid.current.x - rect.left;
-      const lastMidRelY = lastTouchMid.current.y - rect.top;
-      const worldX = (v.scrollLeft + lastMidRelX) / zoom;
-      const worldY = (v.scrollTop + lastMidRelY) / zoom;
-
-      setZoom(nextZoom);
-
-      // Keep that world point under the current midpoint
-      const currentMidRelX = mid.x - rect.left;
-      const currentMidRelY = mid.y - rect.top;
-      v.scrollLeft = worldX * nextZoom - currentMidRelX;
-      v.scrollTop  = worldY * nextZoom - currentMidRelY;
-
-      lastTouchDist.current = dist;
-      lastTouchMid.current = mid;
     }
-  }, [zoom, handleCanvasClick]);
+    // Two-finger touch deliberately does nothing — pinch-zoom disabled on mobile
+  }, []);
 
   const handleTouchEnd = useCallback((e) => {
     panStatus.current = { active: false, x: 0, y: 0 };
-    // If the finger barely moved, treat it as a tap → paint
+    // Short tap with no movement = paint
     if (!touchHasMoved.current && touchStartPos.current) {
-      // Synthesise a click-like event from the last known touch position
       const fakeTouch = { clientX: touchStartPos.current.x, clientY: touchStartPos.current.y };
       isMouseDown.current = true;
       handleCanvasClick(fakeTouch, true);
       isMouseDown.current = false;
     }
     isMouseDown.current = false;
-    lastTouchDist.current = null;
-    lastTouchMid.current = null;
     touchStartPos.current = null;
     touchHasMoved.current = false;
   }, [handleCanvasClick]);
