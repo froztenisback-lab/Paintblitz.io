@@ -261,6 +261,13 @@ export default function App() {
   const handleWheel = useCallback((e) => {
     const v = viewportRef.current;
     if (!v) return;
+
+    // Block trackpad pinch-to-zoom gestures (sent as wheel events with ctrlKey)
+    if (e.ctrlKey) {
+      e.preventDefault();
+      return;
+    }
+
     e.preventDefault();
     const zoomSpeed = 0.12;
     const factor = 1 + (e.deltaY > 0 ? -1 : 1) * zoomSpeed;
@@ -286,7 +293,7 @@ export default function App() {
   }, []);
 
 
-  const handlePanStart = (e) => {
+  const handlePanStart = useCallback((e) => {
     if (e.button === 2) { // Right Click
       setPopup(null);
       // Check for gifting potatoes to teammate in Teams mode
@@ -297,8 +304,8 @@ export default function App() {
         const cy = Math.floor(((e.clientY - rect.top) * sy) / CELL_SIZE);
         const state = stateRef.current;
         if (state && cx >= 0 && cx < state.width && cy >= 0 && cy < state.height) {
-          const cell = state.grid[cy][cx];
-          const owner = isFortWall(cell) ? fortWallOwner(cell) : cell;
+          const cell = state.grid[cy] ? state.grid[cy][cx] : 0;
+          const owner = isFortWall(cell) ? fortWallOwner(cell) : (cell || 0);
           // Identify if the tile belongs to an ally (Team A is 1 and 3)
           if (state.isAlly && state.isAlly(owner, 1) && owner !== 1) {
             setPopup({ type: 'gift', targetId: owner, gridX: cx, gridY: cy });
@@ -308,8 +315,9 @@ export default function App() {
       }
       panStatus.current = { active: true, x: e.clientX, y: e.clientY };
     }
-  };
-  const handlePanMove = (e) => {
+  }, [settings.gameMode, gameStatus]);
+
+  const handlePanMove = useCallback((e) => {
     if (panStatus.current.active && viewportRef.current) {
       const dx = e.clientX - panStatus.current.x;
       const dy = e.clientY - panStatus.current.y;
@@ -318,7 +326,7 @@ export default function App() {
       panStatus.current.x = e.clientX;
       panStatus.current.y = e.clientY;
     }
-  };
+  }, []);
 
 
   // Reset map on refresh
@@ -1176,10 +1184,16 @@ export default function App() {
       // 2+ fingers: cancel everything — pinch zoom disabled
       panStatus.current = { active: false, x: 0, y: 0 };
       isMouseDown.current = false;
+      e.preventDefault(); // Prevent browser from handling multi-touch gestures like pinch-to-zoom
+      if (e.cancelable) e.preventDefault(); 
     }
   }, []);
 
   const handleTouchMove = useCallback((e) => {
+    if (e.touches.length > 1) {
+      if (e.cancelable) e.preventDefault();
+      return; // Forcefully block pinch-to-zoom logic
+    }
     if (e.cancelable) e.preventDefault();
     if (e.touches.length !== 1) return; // ignore multi-touch
     const t = e.touches[0];
@@ -1200,15 +1214,16 @@ export default function App() {
   }, []);
 
   const handleTouchEnd = useCallback(() => {
+    const wasPanning = touchHasMoved.current;
+    panStatus.current.active = false;
+
     // If the finger barely moved, treat it as a tap → paint that cell
-    if (!touchHasMoved.current && touchStartPos.current) {
+    if (!wasPanning && touchStartPos.current) {
       const fakeEvt = { clientX: touchStartPos.current.x, clientY: touchStartPos.current.y };
       isMouseDown.current = true;
       handleCanvasClick(fakeEvt, true);
       isMouseDown.current = false;
     }
-    panStatus.current  = { active: false, x: 0, y: 0 };
-    isMouseDown.current = false;
     touchStartPos.current = null;
     touchHasMoved.current = false;
   }, [handleCanvasClick]);
@@ -1675,9 +1690,10 @@ export default function App() {
             onMouseMove={handlePanMove}
             onContextMenu={(e) => e.preventDefault()}
             className="canvas-viewport custom-scrollbar"
+            style={{ touchAction: 'none' }}
           >
-            <div className="relative flex items-center justify-center min-w-full min-h-full">
-              <div className="relative shadow-2xl shrink-0" style={{ 
+            <div className="relative flex items-start justify-start min-w-full min-h-full overflow-auto">
+              <div className="relative shadow-2xl shrink-0 m-auto" style={{ 
                 width: dims.w * CELL_SIZE * zoom, 
                 height: dims.h * CELL_SIZE * zoom,
                 transition: 'width 0.05s ease-out, height 0.05s ease-out'
