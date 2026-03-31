@@ -1184,17 +1184,27 @@ export default function App() {
       const dist = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
       const mid = { x: (t1.clientX + t2.clientX) / 2, y: (t1.clientY + t2.clientY) / 2 };
       
+      const v = viewportRef.current;
+      if (!v) return;
+      const rect = v.getBoundingClientRect();
+
       const zoomFactor = dist / lastTouchDist.current;
       const nextZoom = clamp(zoom * zoomFactor, 0.4, 2.5);
-      
-      const v = viewportRef.current;
-      const rect = v.getBoundingClientRect();
-      performZoom(nextZoom, mid.x - rect.left, mid.y - rect.top);
 
-      if (v) {
-        v.scrollLeft -= (mid.x - lastTouchMid.current.x);
-        v.scrollTop -= (mid.y - lastTouchMid.current.y);
-      }
+      // Unified navigation logic: Calculate world point under the PREVIOUS midpoint
+      const lastMidRelX = lastTouchMid.current.x - rect.left;
+      const lastMidRelY = lastTouchMid.current.y - rect.top;
+      const worldX = (v.scrollLeft + lastMidRelX) / zoom;
+      const worldY = (v.scrollTop + lastMidRelY) / zoom;
+
+      // Update zoom state
+      setZoom(nextZoom);
+
+      // Update scroll to keep that world coordinate exactly under the CURRENT midpoint
+      const currentMidRelX = mid.x - rect.left;
+      const currentMidRelY = mid.y - rect.top;
+      v.scrollLeft = worldX * nextZoom - currentRelX;
+      v.scrollTop = worldY * nextZoom - currentRelY;
 
       lastTouchDist.current = dist;
       lastTouchMid.current = mid;
