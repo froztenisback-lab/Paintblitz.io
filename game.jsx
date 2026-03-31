@@ -228,6 +228,8 @@ export default function App() {
   const viewportRef = useRef(null);
   const requestRef = useRef(null);
   const stateRef   = useRef(null);
+  const lastTouchDist = useRef(null);
+  const lastTouchMid = useRef(null);
   const [loadedImages, setLoadedImages] = useState({});
   // Cache for recolored versions: "spritePath-color" -> HTMLCanvasElement
   const spriteCache = useRef(new Map());
@@ -1165,66 +1167,65 @@ export default function App() {
 
   const handleTouchStart = useCallback((e) => {
     if (e.touches.length === 1) {
-      const t = e.touches[0];
-      touchStartPos.current = { x: t.clientX, y: t.clientY };
-      touchHasMoved.current = false;
-      isMouseDown.current = false;
-      panStatus.current = { active: true, x: t.clientX, y: t.clientY };
+      // One finger: Paint Mode (allows dragging to draw)
+      isMouseDown.current = true;
+      handleCanvasClick(e.touches[0], true);
     } else if (e.touches.length === 2) {
-      // Two fingers: cancel pan/paint — pinch-zoom disabled on mobile
-      panStatus.current = { active: false, x: 0, y: 0 };
-      isMouseDown.current = false;
+      // Two fingers: Pan & Zoom Mode
+      isMouseDown.current = false; // Disable painting
+      const t1 = e.touches[0], t2 = e.touches[1];
+      lastTouchDist.current = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
+      lastTouchMid.current = { x: (t1.clientX + t2.clientX) / 2, y: (t1.clientY + t2.clientY) / 2 };
     }
-  }, []);
+  }, [handleCanvasClick]);
 
   const handleTouchMove = useCallback((e) => {
     if (e.cancelable) e.preventDefault();
-    if (e.touches.length === 1) {
-      const t = e.touches[0];
-      if (touchStartPos.current) {
-        const dx = t.clientX - touchStartPos.current.x;
-        const dy = t.clientY - touchStartPos.current.y;
-        if (!touchHasMoved.current && Math.hypot(dx, dy) > 6) {
-          touchHasMoved.current = true;
-          isMouseDown.current = false;
+    if (e.touches.length === 1 && isMouseDown.current) {
+      handleCanvasClick(e.touches[0], false);
+    } else if (e.touches.length === 2 && lastTouchMid.current) {
+      const t1 = e.touches[0], t2 = e.touches[1];
+      const dist = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
+      const mid = { x: (t1.clientX + t2.clientX) / 2, y: (t1.clientY + t2.clientY) / 2 };
+      
+      const v = viewportRef.current;
+      if (!v) return;
+      const rect = v.getBoundingClientRect();
+
+      // Handle Pinch Zoom
+      if (lastTouchDist.current) {
+        const zoomFactor = dist / lastTouchDist.current;
+        const nextZoom = clamp(zoom * zoomFactor, 0.4, 2.5);
+        if (Math.abs(zoomFactor - 1) > 0.01) {
+          performZoom(nextZoom, mid.x - rect.left, mid.y - rect.top);
         }
       }
-      if (touchHasMoved.current && panStatus.current.active && viewportRef.current) {
-        const dx = t.clientX - panStatus.current.x;
-        const dy = t.clientY - panStatus.current.y;
-        viewportRef.current.scrollLeft -= dx;
-        viewportRef.current.scrollTop -= dy;
-        panStatus.current.x = t.clientX;
-        panStatus.current.y = t.clientY;
-      }
+
+      // Handle Pan (All directions)
+      v.scrollLeft -= (mid.x - lastTouchMid.current.x);
+      v.scrollTop -= (mid.y - lastTouchMid.current.y);
+
+      lastTouchDist.current = dist;
+      lastTouchMid.current = mid;
     }
-    // Two-finger touch deliberately does nothing — pinch-zoom disabled on mobile
-  }, []);
+  }, [handleCanvasClick, performZoom, zoom]);
 
   const handleTouchEnd = useCallback((e) => {
-    panStatus.current = { active: false, x: 0, y: 0 };
-    // Short tap with no movement = paint
-    if (!touchHasMoved.current && touchStartPos.current) {
-      const fakeTouch = { clientX: touchStartPos.current.x, clientY: touchStartPos.current.y };
-      isMouseDown.current = true;
-      handleCanvasClick(fakeTouch, true);
-      isMouseDown.current = false;
-    }
     isMouseDown.current = false;
-    touchStartPos.current = null;
-    touchHasMoved.current = false;
-  }, [handleCanvasClick]);
+    lastTouchDist.current = null;
+    lastTouchMid.current = null;
+  }, []);
 
   useEffect(() => {
-    const c = canvasRef.current;
-    if (!c) return;
-    c.addEventListener('touchstart', handleTouchStart, { passive: false });
-    c.addEventListener('touchmove', handleTouchMove, { passive: false });
-    c.addEventListener('touchend', handleTouchEnd);
+    const v = viewportRef.current;
+    if (!v) return;
+    v.addEventListener('touchstart', handleTouchStart, { passive: false });
+    v.addEventListener('touchmove', handleTouchMove, { passive: false });
+    v.addEventListener('touchend', handleTouchEnd);
     return () => {
-      c.removeEventListener('touchstart', handleTouchStart);
-      c.removeEventListener('touchmove', handleTouchMove);
-      c.removeEventListener('touchend', handleTouchEnd);
+      v.removeEventListener('touchstart', handleTouchStart);
+      v.removeEventListener('touchmove', handleTouchMove);
+      v.removeEventListener('touchend', handleTouchEnd);
     };
   }, [handleTouchStart, handleTouchMove, handleTouchEnd]);
 
@@ -1676,17 +1677,14 @@ export default function App() {
             onMouseDown={handlePanStart}
             onMouseMove={handlePanMove}
             onContextMenu={(e) => e.preventDefault()}
-            className="canvas-viewport custom-scrollbar flex"
+            className="canvas-viewport custom-scrollbar"
           >
-            {/* 
-                WORLD CONTAINER: This div handles the actual scrollable area calculation.
-                It expands based on the zoom level, solving the "can't scroll to bottom" bug.
-            */}
-            <div className="m-auto relative shadow-2xl" style={{ 
-              width: dims.w * CELL_SIZE * zoom, 
-              height: dims.h * CELL_SIZE * zoom,
-              transition: 'width 0.05s ease-out, height 0.05s ease-out'
-            }}>
+            <div className="relative flex items-center justify-center min-w-full min-h-full">
+              <div className="relative shadow-2xl shrink-0" style={{ 
+                width: dims.w * CELL_SIZE * zoom, 
+                height: dims.h * CELL_SIZE * zoom,
+                transition: 'width 0.05s ease-out, height 0.05s ease-out'
+              }}>
               <canvas 
                 ref={canvasRef} 
                 width={dims.w * CELL_SIZE} 
@@ -1727,6 +1725,7 @@ export default function App() {
                   </button>
                 </div>
               )}
+              </div>
             </div>
           </div>
 
