@@ -665,13 +665,24 @@ export default function App() {
       const b=state.buildings[bldIdx]; b.hp--; b.damageFlash=6;
       if(b.hp<=0){
         if(attackerId===1)addCocoa(BLDG[b.type].cocoaReward);
+        const owner = all.find(e => e.id === b.ownerId);
+        if (owner) {
+          const countKey = BLDG[b.type].countKey;
+          if (countKey) {
+            owner[countKey] = Math.max(0, (owner[countKey] || 0) - 1);
+            // Reset upgrades/access if last building of type is lost
+            if (owner[countKey] === 0) {
+              if (b.type === 'milbase') owner.milbaseAdvanced = false;
+              if (b.type === 'navalport') owner.navalportAdvanced = false;
+            }
+          }
+        }
         // Remove fort walls if a fort is destroyed
         if(b.type==='fort'){
           const bw = BLDG.fort.w, bh = BLDG.fort.h;
           for(const{x,y}of getBuildingPerimeter(b.x, b.y, bw, bh, gw, gh)){
             if(state.grid[y][x]===FORT_WALL_OFFSET+b.ownerId) state.grid[y][x]=b.ownerId;
           }
-          all.find(e=>e.id===b.ownerId).forts=Math.max(0,all.find(e=>e.id===b.ownerId).forts-1);
         }
         state.buildings.splice(bldIdx,1); return true;
       }
@@ -988,8 +999,35 @@ export default function App() {
         }
       });
 
-    // Orphan-check buildings
-    state.buildings=state.buildings.filter(b=>isOwned(state.grid[b.y]?.[b.x],b.ownerId) || (b.type === 'navalport' && state.grid[b.y]?.[b.x] === 5));
+    // Orphan-check buildings (captured territory cleanup)
+    const survivingBuildings = [];
+    for (const b of state.buildings) {
+      const cell = state.grid[b.y]?.[b.x];
+      const isStillOwned = isOwned(cell, b.ownerId) || (b.type === 'navalport' && cell === 5);
+      
+      if (isStillOwned) {
+        survivingBuildings.push(b);
+      } else {
+        // Building was lost due to territory capture
+        const owner = all.find(e => e.id === b.ownerId);
+        if (owner) {
+          const countKey = BLDG[b.type].countKey;
+          if (countKey) {
+            owner[countKey] = Math.max(0, (owner[countKey] || 0) - 1);
+            if (owner[countKey] === 0) {
+              if (b.type === 'milbase') owner.milbaseAdvanced = false;
+              if (b.type === 'navalport') owner.navalportAdvanced = false;
+            }
+          }
+          if (b.type === 'fort') {
+            const bw = BLDG.fort.w, bh = BLDG.fort.h;
+            for(const{x,y}of getBuildingPerimeter(b.x, b.y, bw, bh, gw, gh))
+              if(state.grid[y][x]===FORT_WALL_OFFSET+b.ownerId) state.grid[y][x]=b.ownerId;
+          }
+        }
+      }
+    }
+    state.buildings = survivingBuildings;
 
     if(state.tickCount%2===0){ syncUI(); updateGridCache(); }
   }, [syncUI, addCocoa, updateGridCache]);
@@ -1249,6 +1287,7 @@ export default function App() {
 
   const deployNavalUnit=(type)=>{
     const p=stateRef.current.player;
+    if (p.navalports === 0) return;
     const uDef=UNITS[type]; const costK=uDef.costKey;
     if(p.potatoes<p[costK])return;
     p.potatoes-=p[costK]; p[costK]=Math.floor(p[costK]*1.4);
