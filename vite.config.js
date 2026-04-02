@@ -1,8 +1,9 @@
+// vite.config.ts
 import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
+import react from '@vitejs/react-react'
 
-// https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
-  base: '/inkwar.io/', 
+  // If the environment is GitHub Actions, use the repo name, otherwise use root
+  base: process.env.GITHUB_PAGES ? '/inkwar.io/' : '/',
 })
