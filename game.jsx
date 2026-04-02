@@ -6,6 +6,18 @@ import { fmt, rnd, clamp, isOwned, isFortWall, fortWallOwner, findTiles, canPlac
 import { createInitialState, parseImageToGrid, createRecoloredCanvas } from './mapLogic';
 import Overlay from './Overlay';
 import { socket } from './main';
+// src/game.tsx
+import PlayerList from './components/PlayerList'; // If using Option 1
+
+function Game() {
+  return (
+    <div className="game-container">
+       <PlayerList />  {/* This renders the leaderboard on top of the game */}
+       <canvas id="gameCanvas" />
+       {/* ... your other game code */}
+    </div>
+  );
+}
 
 const loadImage = (src) => new Promise((resolve, reject) => {
   const img = new Image();
