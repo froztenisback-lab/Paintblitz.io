@@ -4,8 +4,9 @@ import './style.css'
 import App from './game'
 import { io } from "socket.io-client";
 
-export const socket = io("http://localhost:3000"); // Point this to your server.js port
-
+export const client = new Ably.Realtime({ 
+  authUrl: '/api/auth' 
+});
 socket.on("connect", () => {
   console.log("Connected to server with ID:", socket.id);
 });
